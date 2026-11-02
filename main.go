@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"github.com/mablankg/WhatsApp-API-GO-Vercel/internal/data"
 	qrcode "github.com/skip2/go-qrcode"
 	"io"
@@ -17,9 +18,11 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 var phonePattern = regexp.MustCompile(`^[1-9][0-9]{7,14}$`)
+var groupPattern = regexp.MustCompile(`^[0-9-]+@g\.us$`)
 
 func main() {
 	token := os.Getenv("API_TOKEN")
@@ -88,6 +91,90 @@ func handler(db *sql.DB, token string) http.Handler {
 			}
 			w.Header().Set("Content-Type", "image/png")
 			w.Write(png)
+		case r.Method == "GET" && r.URL.Path == "/v1/groups":
+			rows, err := db.QueryContext(ctx, "SELECT group_id,name,topic,participant_count,is_announce,updated_at FROM groups ORDER BY lower(name),group_id")
+			if err != nil {
+				fail()
+				return
+			}
+			defer rows.Close()
+			items := []map[string]any{}
+			for rows.Next() {
+				var id, name, topic string
+				var count int
+				var announce bool
+				var updated time.Time
+				if rows.Scan(&id, &name, &topic, &count, &announce, &updated) != nil {
+					fail()
+					return
+				}
+				items = append(items, map[string]any{"id": id, "name": name, "topic": topic, "participant_count": count, "is_announce": announce, "updated_at": updated})
+			}
+			if rows.Err() != nil {
+				fail()
+				return
+			}
+			respond(w, 200, map[string]any{"groups": items})
+		case r.Method == "POST" && r.URL.Path == "/v1/groups":
+			var body struct {
+				Name         string   `json:"name"`
+				Participants []string `json:"participants"`
+			}
+			dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 32768))
+			dec.DisallowUnknownFields()
+			if dec.Decode(&body) != nil || dec.Decode(new(any)) != io.EOF {
+				respond(w, 400, map[string]string{"error": "invalid_group"})
+				return
+			}
+			body.Name = strings.TrimSpace(body.Name)
+			if utf8.RuneCountInString(body.Name) < 1 || utf8.RuneCountInString(body.Name) > 25 || len(body.Participants) < 1 || len(body.Participants) > 100 {
+				respond(w, 400, map[string]string{"error": "use name com 1 a 25 caracteres e participants com 1 a 100 números"})
+				return
+			}
+			seen := map[string]bool{}
+			participants := make([]string, 0, len(body.Participants))
+			for _, participant := range body.Participants {
+				if !phonePattern.MatchString(participant) {
+					respond(w, 400, map[string]string{"error": "participants devem conter DDI e somente dígitos"})
+					return
+				}
+				if !seen[participant] {
+					seen[participant] = true
+					participants = append(participants, participant)
+				}
+			}
+			body.Participants = participants
+			id, err := enqueue(ctx, db, "create_group", body)
+			if err != nil {
+				respondQueueError(w, err, fail)
+				return
+			}
+			respond(w, 202, map[string]string{"id": id, "status": "pending", "poll": "/v1/commands/" + id})
+		case r.Method == "POST" && isGroupMessagePath(r.URL.Path):
+			groupID := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/groups/"), "/messages")
+			if !groupPattern.MatchString(groupID) {
+				respond(w, 400, map[string]string{"error": "invalid_group_id"})
+				return
+			}
+			var body struct {
+				Text string `json:"text"`
+			}
+			dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16384))
+			dec.DisallowUnknownFields()
+			if dec.Decode(&body) != nil || dec.Decode(new(any)) != io.EOF || strings.TrimSpace(body.Text) == "" || len(body.Text) > 8000 {
+				respond(w, 400, map[string]string{"error": "text deve ter entre 1 e 8000 bytes"})
+				return
+			}
+			payload := struct {
+				GroupID string `json:"group_id"`
+				Text    string `json:"text"`
+			}{GroupID: groupID, Text: body.Text}
+			id, err := enqueue(ctx, db, "send_group", payload)
+			if err != nil {
+				respondQueueError(w, err, fail)
+				return
+			}
+			respond(w, 202, map[string]string{"id": id, "status": "pending", "poll": "/v1/commands/" + id})
 		case r.Method == "POST" && (r.URL.Path == "/v1/connect" || r.URL.Path == "/v1/messages"):
 			kind := "connect"
 			payload := []byte(`{}`)
@@ -105,23 +192,9 @@ func handler(db *sql.DB, token string) http.Handler {
 				}
 				payload, _ = json.Marshal(body)
 			}
-			var alive bool
-			if db.QueryRowContext(ctx, "SELECT heartbeat>now()-interval '20 seconds' FROM state WHERE id=1").Scan(&alive) != nil {
-				fail()
-				return
-			}
-			if !alive {
-				respond(w, 503, map[string]string{"error": "worker_offline"})
-				return
-			}
-			b := make([]byte, 16)
-			if _, err := rand.Read(b); err != nil {
-				fail()
-				return
-			}
-			id := hex.EncodeToString(b)
-			if _, err := db.ExecContext(ctx, "INSERT INTO commands(id,kind,payload) VALUES($1,$2,$3)", id, kind, string(payload)); err != nil {
-				fail()
+			id, err := enqueueRaw(ctx, db, kind, payload)
+			if err != nil {
+				respondQueueError(w, err, fail)
 				return
 			}
 			respond(w, 202, map[string]string{"id": id, "status": "pending", "poll": "/v1/commands/" + id})
@@ -180,3 +253,42 @@ func handler(db *sql.DB, token string) http.Handler {
 	})
 }
 func fmtCursor(n int64) string { return strconv.FormatInt(n, 10) }
+
+var errWorkerOffline = errors.New("worker offline")
+
+func enqueue(ctx context.Context, db *sql.DB, kind string, payload any) (string, error) {
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	return enqueueRaw(ctx, db, kind, raw)
+}
+
+func enqueueRaw(ctx context.Context, db *sql.DB, kind string, payload []byte) (string, error) {
+	var alive bool
+	if err := db.QueryRowContext(ctx, "SELECT heartbeat>now()-interval '20 seconds' FROM state WHERE id=1").Scan(&alive); err != nil {
+		return "", err
+	}
+	if !alive {
+		return "", errWorkerOffline
+	}
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	id := hex.EncodeToString(b)
+	_, err := db.ExecContext(ctx, "INSERT INTO commands(id,kind,payload) VALUES($1,$2,$3)", id, kind, string(payload))
+	return id, err
+}
+
+func respondQueueError(w http.ResponseWriter, err error, databaseFailure func()) {
+	if err == errWorkerOffline {
+		respond(w, 503, map[string]string{"error": "worker_offline"})
+		return
+	}
+	databaseFailure()
+}
+
+func isGroupMessagePath(path string) bool {
+	return strings.HasPrefix(path, "/v1/groups/") && strings.HasSuffix(path, "/messages")
+}

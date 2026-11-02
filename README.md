@@ -35,8 +35,13 @@ Todos os endpoints exigem `Authorization: Bearer SEU_TOKEN`. Respostas usam `Cac
 | POST | `/v1/messages` | Enfileira texto; retorna 202 e ID |
 | GET | `/v1/commands/{id}` | Resultado do comando |
 | GET | `/v1/messages?after=0` | Até 100 mensagens recebidas, com cursor `next_after` |
+| GET | `/v1/groups` | Lista os grupos sincronizados da conta |
+| POST | `/v1/groups` | Cria um grupo com nome e participantes |
+| POST | `/v1/groups/{group_id}/messages` | Enfileira texto para um grupo |
 
 Envio: `{"to":"5511999999999","text":"Olá!"}`. Use DDI + DDD + número, apenas dígitos.
+
+Criação de grupo: `{"name":"Nome do grupo","participants":["5511999999999"]}`. O nome aceita até 25 caracteres. A própria conta conectada é adicionada automaticamente pelo WhatsApp.
 
 O retorno 202 **não confirma envio**. Consulte o comando até `done`, `failed` ou `unknown`. Um comando `connect` concluído indica que a conexão foi iniciada; consulte status/QR para acompanhar o pareamento.
 

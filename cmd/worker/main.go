@@ -105,12 +105,16 @@ func main() {
 	}
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
+	groupTicker := time.NewTicker(time.Minute)
+	defer groupTicker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
 			w.next()
+		case <-groupTicker.C:
+			go w.refreshGroups()
 		}
 	}
 }
@@ -127,6 +131,7 @@ func (w *worker) event(event any) {
 	switch e := event.(type) {
 	case *events.Connected:
 		w.state("connected", "", 0)
+		go w.refreshGroups()
 	case *events.Disconnected:
 		w.state("disconnected", "", 0)
 	case *events.LoggedOut:
@@ -179,7 +184,7 @@ func (w *worker) connect() error {
 	return nil
 }
 func (w *worker) next() {
-	ctx, cancel := context.WithTimeout(w.ctx, 30*time.Second)
+	ctx, cancel := context.WithTimeout(w.ctx, 60*time.Second)
 	defer cancel()
 	var id, kind string
 	var raw []byte
@@ -219,6 +224,52 @@ func (w *worker) next() {
 		} else {
 			result["message_id"] = response.ID
 		}
+	case "create_group":
+		var p struct {
+			Name         string
+			Participants []string
+		}
+		if json.Unmarshal(raw, &p) != nil || !w.client.IsLoggedIn() {
+			result["error"] = "whatsapp_not_connected"
+			status = "failed"
+			break
+		}
+		participants := make([]types.JID, len(p.Participants))
+		for i, participant := range p.Participants {
+			participants[i] = types.NewJID(participant, types.DefaultUserServer)
+		}
+		group, err := w.client.CreateGroup(ctx, whatsmeow.ReqCreateGroup{Name: p.Name, Participants: participants})
+		if err != nil {
+			result["error"] = "group_creation_failed"
+			status = "failed"
+		} else {
+			result["group_id"] = group.JID.String()
+			result["name"] = group.Name
+			w.upsertGroup(group)
+		}
+	case "send_group":
+		var p struct {
+			GroupID string `json:"group_id"`
+			Text    string `json:"text"`
+		}
+		if json.Unmarshal(raw, &p) != nil {
+			result["error"] = "invalid_group_or_not_connected"
+			status = "failed"
+			break
+		}
+		groupJID, parseErr := types.ParseJID(p.GroupID)
+		if parseErr != nil || groupJID.Server != types.GroupServer || !w.client.IsLoggedIn() {
+			result["error"] = "invalid_group_or_not_connected"
+			status = "failed"
+			break
+		}
+		response, err := w.client.SendMessage(ctx, groupJID, &waE2E.Message{Conversation: proto.String(p.Text)})
+		if err != nil {
+			result["error"] = "delivery_unknown_check_before_retry"
+			status = "unknown"
+		} else {
+			result["message_id"] = response.ID
+		}
 	default:
 		result["error"] = "unsupported_command"
 		status = "failed"
@@ -228,5 +279,43 @@ func (w *worker) next() {
 	defer saveCancel()
 	if _, err = w.db.ExecContext(saveCtx, "UPDATE commands SET status=$2,result=$3 WHERE id=$1", id, status, string(encoded)); err != nil {
 		log.Print("falha ao salvar resultado; comando não será reenviado automaticamente")
+	}
+}
+
+func (w *worker) refreshGroups() {
+	if !w.client.IsLoggedIn() {
+		return
+	}
+	ctx, cancel := context.WithTimeout(w.ctx, 45*time.Second)
+	defer cancel()
+	groups, err := w.client.GetJoinedGroups(ctx)
+	if err != nil {
+		log.Printf("falha ao atualizar grupos: %v", err)
+		return
+	}
+	tx, err := w.db.BeginTx(ctx, nil)
+	if err != nil {
+		return
+	}
+	defer tx.Rollback()
+	if _, err = tx.ExecContext(ctx, "DELETE FROM groups"); err != nil {
+		return
+	}
+	for _, group := range groups {
+		if _, err = tx.ExecContext(ctx, `INSERT INTO groups(group_id,name,topic,participant_count,is_announce,updated_at) VALUES($1,$2,$3,$4,$5,now())`, group.JID.String(), group.Name, group.Topic, len(group.Participants), group.IsAnnounce); err != nil {
+			return
+		}
+	}
+	if err = tx.Commit(); err != nil {
+		log.Printf("falha ao salvar grupos: %v", err)
+	}
+}
+
+func (w *worker) upsertGroup(group *types.GroupInfo) {
+	ctx, cancel := context.WithTimeout(w.ctx, 5*time.Second)
+	defer cancel()
+	_, err := w.db.ExecContext(ctx, `INSERT INTO groups(group_id,name,topic,participant_count,is_announce,updated_at) VALUES($1,$2,$3,$4,$5,now()) ON CONFLICT(group_id) DO UPDATE SET name=excluded.name,topic=excluded.topic,participant_count=excluded.participant_count,is_announce=excluded.is_announce,updated_at=now()`, group.JID.String(), group.Name, group.Topic, len(group.Participants), group.IsAnnounce)
+	if err != nil {
+		log.Printf("falha ao salvar grupo criado: %v", err)
 	}
 }

@@ -35,3 +35,31 @@ func TestInvalidSendDoesNotReachDatabase(t *testing.T) {
 		}
 	}
 }
+
+func TestInvalidGroupDoesNotReachDatabase(t *testing.T) {
+	token := strings.Repeat("a", 32)
+	for _, body := range []string{
+		`{}`,
+		`{"name":"","participants":["5511999999999"]}`,
+		`{"name":"Grupo","participants":[]}`,
+		`{"name":"Grupo","participants":["+5511999999999"]}`,
+		`{"name":"Nome de grupo com mais de vinte e cinco caracteres","participants":["5511999999999"]}`,
+	} {
+		r := httptest.NewRequest("POST", "/v1/groups", strings.NewReader(body))
+		r.Header.Set("Authorization", "Bearer "+token)
+		out := httptest.NewRecorder()
+		handler(nil, token).ServeHTTP(out, r)
+		if out.Code != 400 {
+			t.Fatalf("invalid group returned %d", out.Code)
+		}
+	}
+}
+
+func TestGroupMessagePath(t *testing.T) {
+	if !isGroupMessagePath("/v1/groups/120363123456@g.us/messages") {
+		t.Fatal("valid group message path was rejected")
+	}
+	if isGroupMessagePath("/v1/groups") || isGroupMessagePath("/v1/groups/120363123456@g.us") {
+		t.Fatal("non-message group path was accepted")
+	}
+}
