@@ -1,0 +1,11 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": "go",
+  "daemons": {
+    "whatsapp": {
+      "root": ".",
+      "entrypoint": "Dockerfile",
+      "instances": { "iad1": 1 }
+    }
+  }
+}

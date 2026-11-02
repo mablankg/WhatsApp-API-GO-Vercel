@@ -1,0 +1,7 @@
+.env
+.env.*
+!.env.example
+server
+worker
+*.exe
+.vercel/
