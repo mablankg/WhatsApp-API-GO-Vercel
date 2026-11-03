@@ -377,12 +377,19 @@ func (w *worker) refreshContacts() (int, error) {
 	defer tx.Rollback()
 	count := 0
 	for jid, info := range items {
-		if jid.Server != types.DefaultUserServer || !phonePatternWorker.MatchString(jid.User) {
+		phoneJID := jid
+		if jid.Server == types.HiddenUserServer {
+			phoneJID, err = w.client.Store.LIDs.GetPNForLID(ctx, jid)
+			if err != nil {
+				continue
+			}
+		}
+		if phoneJID.Server != types.DefaultUserServer || !phonePatternWorker.MatchString(phoneJID.User) {
 			continue
 		}
 		name := firstContactName(info.FullName, info.BusinessName, info.PushName, info.FirstName)
 		_, err = tx.ExecContext(ctx, `INSERT INTO contacts(whatsapp_id,phone,name) VALUES($1,$2,$3)
-			ON CONFLICT(phone) DO UPDATE SET name=CASE WHEN contacts.name='' THEN excluded.name ELSE contacts.name END,updated_at=now()`, jid.String(), jid.User, name)
+			ON CONFLICT(phone) DO UPDATE SET name=CASE WHEN contacts.name='' THEN excluded.name ELSE contacts.name END,updated_at=now()`, phoneJID.String(), phoneJID.User, name)
 		if err != nil {
 			return 0, err
 		}
