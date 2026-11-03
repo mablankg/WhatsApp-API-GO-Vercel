@@ -53,6 +53,15 @@ func scanContact(scanner interface{ Scan(...any) error }) (contact, error) {
 
 func handleContacts(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 	ctx := r.Context()
+	if r.URL.Path == "/v1/contacts/sync" && r.Method == http.MethodPost {
+		id, err := enqueueRaw(ctx, db, "sync_contacts", []byte(`{}`))
+		if err != nil {
+			respondQueueError(w, err, func() { respond(w, 503, map[string]string{"error": "contacts_unavailable"}) })
+			return
+		}
+		respond(w, 202, map[string]string{"id": id, "status": "pending", "poll": "/v1/commands/" + id})
+		return
+	}
 	if r.URL.Path == "/v1/contacts" && r.Method == http.MethodGet {
 		q := strings.TrimSpace(r.URL.Query().Get("q"))
 		archived := r.URL.Query().Get("archived") == "true"

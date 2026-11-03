@@ -15,7 +15,9 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"regexp"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -134,6 +136,7 @@ func (w *worker) event(event any) {
 	case *events.Connected:
 		w.state("connected", "", 0)
 		go func() { _, _ = w.refreshGroups() }()
+		go func() { _, _ = w.refreshContacts() }()
 	case *events.Disconnected:
 		w.state("disconnected", "", 0)
 	case *events.LoggedOut:
@@ -295,6 +298,19 @@ func (w *worker) next() {
 		} else {
 			result["group_count"] = strconv.Itoa(count)
 		}
+	case "sync_contacts":
+		if !w.client.IsLoggedIn() {
+			result["error"] = "whatsapp_not_connected"
+			status = "failed"
+			break
+		}
+		count, err := w.refreshContacts()
+		if err != nil {
+			result["error"] = "contact_sync_failed"
+			status = "failed"
+		} else {
+			result["contact_count"] = strconv.Itoa(count)
+		}
 	default:
 		result["error"] = "unsupported_command"
 		status = "failed"
@@ -345,5 +361,47 @@ func (w *worker) upsertGroup(group *types.GroupInfo) {
 	if err != nil {
 		log.Printf("falha ao salvar grupo criado: %v", err)
 	}
+}
+
+func (w *worker) refreshContacts() (int, error) {
+	ctx, cancel := context.WithTimeout(w.ctx, 45*time.Second)
+	defer cancel()
+	items, err := w.client.Store.Contacts.GetAllContacts(ctx)
+	if err != nil {
+		return 0, err
+	}
+	tx, err := w.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	count := 0
+	for jid, info := range items {
+		if jid.Server != types.DefaultUserServer || !phonePatternWorker.MatchString(jid.User) {
+			continue
+		}
+		name := firstContactName(info.FullName, info.BusinessName, info.PushName, info.FirstName)
+		_, err = tx.ExecContext(ctx, `INSERT INTO contacts(whatsapp_id,phone,name) VALUES($1,$2,$3)
+			ON CONFLICT(phone) DO UPDATE SET name=CASE WHEN contacts.name='' THEN excluded.name ELSE contacts.name END,updated_at=now()`, jid.String(), jid.User, name)
+		if err != nil {
+			return 0, err
+		}
+		count++
+	}
+	if err = tx.Commit(); err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
+var phonePatternWorker = regexp.MustCompile(`^[1-9][0-9]{7,14}$`)
+
+func firstContactName(values ...string) string {
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 

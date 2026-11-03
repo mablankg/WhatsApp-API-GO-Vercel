@@ -43,6 +43,7 @@ Todos os endpoints exigem `Authorization: Bearer SEU_TOKEN`. Respostas usam `Cac
 | POST | `/v1/contacts` | Cria um contato manual pelo telefone |
 | GET | `/v1/contacts/{id}` | Consulta a ficha completa do contato |
 | PATCH | `/v1/contacts/{id}` | Atualiza dados, etiquetas, observações e campos extras |
+| POST | `/v1/contacts/sync` | Importa a agenda armazenada na sessão do WhatsApp |
 
 Envio: `{"to":"5511999999999","text":"Olá!"}`. Use DDI + DDD + número, apenas dígitos.
 
