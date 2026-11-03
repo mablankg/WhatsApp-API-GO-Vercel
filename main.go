@@ -115,6 +115,13 @@ func handler(db *sql.DB, token string) http.Handler {
 				return
 			}
 			respond(w, 200, map[string]any{"groups": items})
+		case r.Method == "POST" && r.URL.Path == "/v1/groups/sync":
+			id, err := enqueueRaw(ctx, db, "sync_groups", []byte(`{}`))
+			if err != nil {
+				respondQueueError(w, err, fail)
+				return
+			}
+			respond(w, 202, map[string]string{"id": id, "status": "pending", "poll": "/v1/commands/" + id})
 		case r.Method == "POST" && r.URL.Path == "/v1/groups":
 			var body struct {
 				Name         string   `json:"name"`
@@ -292,3 +299,4 @@ func respondQueueError(w http.ResponseWriter, err error, databaseFailure func())
 func isGroupMessagePath(path string) bool {
 	return strings.HasPrefix(path, "/v1/groups/") && strings.HasSuffix(path, "/messages")
 }
+
