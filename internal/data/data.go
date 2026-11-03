@@ -97,6 +97,12 @@ CREATE TABLE IF NOT EXISTS contacts (
 );
 CREATE INDEX IF NOT EXISTS contacts_name_search ON contacts(lower(name));
 CREATE INDEX IF NOT EXISTS contacts_last_contact ON contacts(last_contact_at DESC);
+INSERT INTO contacts(whatsapp_id,phone,first_contact_at,last_contact_at)
+SELECT chat,split_part(chat,'@',1),min(timestamp),max(timestamp)
+FROM messages WHERE chat LIKE '%@s.whatsapp.net'
+GROUP BY chat
+ON CONFLICT(whatsapp_id) DO UPDATE SET
+ last_contact_at=GREATEST(contacts.last_contact_at,excluded.last_contact_at),updated_at=now();
 ALTER TABLE state ENABLE ROW LEVEL SECURITY;
 ALTER TABLE commands ENABLE ROW LEVEL SECURITY;
 ALTER TABLE messages ENABLE ROW LEVEL SECURITY;
