@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"github.com/mablankg/WhatsApp-API-GO-Vercel/internal/data"
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
@@ -14,6 +15,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -131,7 +133,7 @@ func (w *worker) event(event any) {
 	switch e := event.(type) {
 	case *events.Connected:
 		w.state("connected", "", 0)
-		go w.refreshGroups()
+		go func() { _, _ = w.refreshGroups() }()
 	case *events.Disconnected:
 		w.state("disconnected", "", 0)
 	case *events.LoggedOut:
@@ -270,6 +272,19 @@ func (w *worker) next() {
 		} else {
 			result["message_id"] = response.ID
 		}
+	case "sync_groups":
+		if !w.client.IsLoggedIn() {
+			result["error"] = "whatsapp_not_connected"
+			status = "failed"
+			break
+		}
+		count, err := w.refreshGroups()
+		if err != nil {
+			result["error"] = "group_sync_failed"
+			status = "failed"
+		} else {
+			result["group_count"] = strconv.Itoa(count)
+		}
 	default:
 		result["error"] = "unsupported_command"
 		status = "failed"
@@ -282,33 +297,35 @@ func (w *worker) next() {
 	}
 }
 
-func (w *worker) refreshGroups() {
+func (w *worker) refreshGroups() (int, error) {
 	if !w.client.IsLoggedIn() {
-		return
+		return 0, errors.New("whatsapp not connected")
 	}
 	ctx, cancel := context.WithTimeout(w.ctx, 45*time.Second)
 	defer cancel()
 	groups, err := w.client.GetJoinedGroups(ctx)
 	if err != nil {
 		log.Printf("falha ao atualizar grupos: %v", err)
-		return
+		return 0, err
 	}
 	tx, err := w.db.BeginTx(ctx, nil)
 	if err != nil {
-		return
+		return 0, err
 	}
 	defer tx.Rollback()
 	if _, err = tx.ExecContext(ctx, "DELETE FROM groups"); err != nil {
-		return
+		return 0, err
 	}
 	for _, group := range groups {
 		if _, err = tx.ExecContext(ctx, `INSERT INTO groups(group_id,name,topic,participant_count,is_announce,updated_at) VALUES($1,$2,$3,$4,$5,now())`, group.JID.String(), group.Name, group.Topic, len(group.Participants), group.IsAnnounce); err != nil {
-			return
+			return 0, err
 		}
 	}
 	if err = tx.Commit(); err != nil {
 		log.Printf("falha ao salvar grupos: %v", err)
+		return 0, err
 	}
+	return len(groups), nil
 }
 
 func (w *worker) upsertGroup(group *types.GroupInfo) {
@@ -319,3 +336,4 @@ func (w *worker) upsertGroup(group *types.GroupInfo) {
 		log.Printf("falha ao salvar grupo criado: %v", err)
 	}
 }
+
