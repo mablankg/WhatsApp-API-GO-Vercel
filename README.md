@@ -39,6 +39,10 @@ Todos os endpoints exigem `Authorization: Bearer SEU_TOKEN`. Respostas usam `Cac
 | POST | `/v1/groups/sync` | Solicita sincronização imediata dos grupos com o WhatsApp |
 | POST | `/v1/groups` | Cria um grupo com nome e participantes |
 | POST | `/v1/groups/{group_id}/messages` | Enfileira texto para um grupo |
+| GET | `/v1/contacts?q=` | Lista e pesquisa contatos do CRM |
+| POST | `/v1/contacts` | Cria um contato manual pelo telefone |
+| GET | `/v1/contacts/{id}` | Consulta a ficha completa do contato |
+| PATCH | `/v1/contacts/{id}` | Atualiza dados, etiquetas, observações e campos extras |
 
 Envio: `{"to":"5511999999999","text":"Olá!"}`. Use DDI + DDD + número, apenas dígitos.
 

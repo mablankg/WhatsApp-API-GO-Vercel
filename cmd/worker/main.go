@@ -152,6 +152,16 @@ func (w *worker) event(event any) {
 		if err != nil {
 			log.Print("falha ao guardar mensagem recebida")
 		}
+		if e.Info.Chat.Server == types.DefaultUserServer {
+			_, err = w.db.ExecContext(ctx, `INSERT INTO contacts(whatsapp_id,phone,name,first_contact_at,last_contact_at)
+				VALUES($1,$2,$3,$4,$4) ON CONFLICT(whatsapp_id) DO UPDATE SET
+				name=CASE WHEN contacts.name='' THEN excluded.name ELSE contacts.name END,
+				last_contact_at=GREATEST(contacts.last_contact_at,excluded.last_contact_at),updated_at=now()`,
+				e.Info.Chat.String(), e.Info.Chat.User, e.Info.PushName, e.Info.Timestamp)
+			if err != nil {
+				log.Print("falha ao atualizar contato")
+			}
+		}
 	}
 }
 func (w *worker) connect() error {

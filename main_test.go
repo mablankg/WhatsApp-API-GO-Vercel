@@ -8,7 +8,7 @@ import (
 
 func TestAuthorizationProtectsEveryEndpoint(t *testing.T) {
 	token := strings.Repeat("a", 32)
-	for _, path := range []string{"/v1/status", "/v1/qr", "/v1/messages", "/v1/connect", "/v1/groups", "/v1/groups/sync", "/v1/commands/123"} {
+	for _, path := range []string{"/v1/status", "/v1/qr", "/v1/messages", "/v1/connect", "/v1/groups", "/v1/groups/sync", "/v1/contacts", "/v1/contacts/1", "/v1/commands/123"} {
 		for _, auth := range []string{"", "Bearer wrong", "Bearer " + strings.Repeat("b", 32)} {
 			r := httptest.NewRequest("GET", path, nil)
 			r.Header.Set("Authorization", auth)
@@ -20,6 +20,19 @@ func TestAuthorizationProtectsEveryEndpoint(t *testing.T) {
 			if out.Header().Get("Cache-Control") != "no-store" {
 				t.Fatal("sensitive responses must not be cached")
 			}
+		}
+	}
+}
+
+func TestInvalidContactDoesNotReachDatabase(t *testing.T) {
+	token := strings.Repeat("a", 32)
+	for _, body := range []string{`{}`, `{"phone":"+5511999999999","name":"Teste"}`, `{"phone":"123","name":"Teste"}`, `{"phone":"5511999999999","unknown":true}`} {
+		r := httptest.NewRequest("POST", "/v1/contacts", strings.NewReader(body))
+		r.Header.Set("Authorization", "Bearer "+token)
+		out := httptest.NewRecorder()
+		handler(nil, token).ServeHTTP(out, r)
+		if out.Code != 400 {
+			t.Fatalf("invalid contact returned %d", out.Code)
 		}
 	}
 }

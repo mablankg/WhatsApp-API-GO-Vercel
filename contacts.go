@@ -1,0 +1,198 @@
+package main
+
+import (
+	"database/sql"
+	"encoding/json"
+	"io"
+	"net/http"
+	"regexp"
+	"strings"
+	"time"
+
+	"github.com/lib/pq"
+)
+
+var contactIDPattern = regexp.MustCompile(`^[1-9][0-9]{0,18}$`)
+
+type contact struct {
+	ID             int64          `json:"id"`
+	WhatsAppID     string         `json:"whatsapp_id"`
+	Phone          string         `json:"phone"`
+	Name           string         `json:"name"`
+	Email          string         `json:"email"`
+	TaxID          string         `json:"tax_id"`
+	ContactType    string         `json:"contact_type"`
+	Status         string         `json:"status"`
+	Responsible    string         `json:"responsible"`
+	Tags           pq.StringArray `json:"tags"`
+	Notes          string         `json:"notes"`
+	Extra          map[string]any `json:"extra"`
+	FirstContactAt time.Time      `json:"first_contact_at"`
+	LastContactAt  time.Time      `json:"last_contact_at"`
+	Archived       bool           `json:"archived"`
+	UpdatedAt      time.Time      `json:"updated_at"`
+}
+
+const contactColumns = `id,whatsapp_id,phone,name,email,tax_id,contact_type,status,responsible,tags,notes,extra,first_contact_at,last_contact_at,archived,updated_at`
+
+func scanContact(scanner interface{ Scan(...any) error }) (contact, error) {
+	var item contact
+	var extra []byte
+	err := scanner.Scan(&item.ID, &item.WhatsAppID, &item.Phone, &item.Name, &item.Email, &item.TaxID, &item.ContactType, &item.Status, &item.Responsible, &item.Tags, &item.Notes, &extra, &item.FirstContactAt, &item.LastContactAt, &item.Archived, &item.UpdatedAt)
+	if len(extra) > 0 {
+		_ = json.Unmarshal(extra, &item.Extra)
+	}
+	if item.Extra == nil {
+		item.Extra = map[string]any{}
+	}
+	if item.Tags == nil {
+		item.Tags = pq.StringArray{}
+	}
+	return item, err
+}
+
+func handleContacts(w http.ResponseWriter, r *http.Request, db *sql.DB) {
+	ctx := r.Context()
+	if r.URL.Path == "/v1/contacts" && r.Method == http.MethodGet {
+		q := strings.TrimSpace(r.URL.Query().Get("q"))
+		archived := r.URL.Query().Get("archived") == "true"
+		rows, err := db.QueryContext(ctx, `SELECT `+contactColumns+` FROM contacts
+			WHERE archived=$1 AND ($2='' OR name ILIKE '%'||$2||'%' OR phone LIKE '%'||$2||'%' OR email ILIKE '%'||$2||'%')
+			ORDER BY last_contact_at DESC,id DESC LIMIT 200`, archived, q)
+		if err != nil {
+			respond(w, 503, map[string]string{"error": "contacts_unavailable"})
+			return
+		}
+		defer rows.Close()
+		items := []contact{}
+		for rows.Next() {
+			item, err := scanContact(rows)
+			if err != nil {
+				respond(w, 503, map[string]string{"error": "contacts_unavailable"})
+				return
+			}
+			items = append(items, item)
+		}
+		respond(w, 200, map[string]any{"contacts": items})
+		return
+	}
+	if r.URL.Path == "/v1/contacts" && r.Method == http.MethodPost {
+		var body struct {
+			Phone string `json:"phone"`
+			Name  string `json:"name"`
+		}
+		dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8192))
+		dec.DisallowUnknownFields()
+		if dec.Decode(&body) != nil || dec.Decode(new(any)) != io.EOF {
+			respond(w, 400, map[string]string{"error": "invalid_contact"})
+			return
+		}
+		body.Phone = strings.TrimSpace(body.Phone)
+		body.Name = strings.TrimSpace(body.Name)
+		if !phonePattern.MatchString(body.Phone) || len(body.Name) > 160 {
+			respond(w, 400, map[string]string{"error": "invalid_contact"})
+			return
+		}
+		item, err := scanContact(db.QueryRowContext(ctx, `INSERT INTO contacts(whatsapp_id,phone,name) VALUES($1,$2,$3)
+			ON CONFLICT(phone) DO UPDATE SET name=CASE WHEN excluded.name<>'' THEN excluded.name ELSE contacts.name END,updated_at=now()
+			RETURNING `+contactColumns, body.Phone+"@s.whatsapp.net", body.Phone, body.Name))
+		if err != nil {
+			respond(w, 503, map[string]string{"error": "contact_not_saved"})
+			return
+		}
+		respond(w, 201, item)
+		return
+	}
+	id := strings.TrimPrefix(r.URL.Path, "/v1/contacts/")
+	if !contactIDPattern.MatchString(id) {
+		respond(w, 404, map[string]string{"error": "not_found"})
+		return
+	}
+	if r.Method == http.MethodGet {
+		item, err := scanContact(db.QueryRowContext(ctx, "SELECT "+contactColumns+" FROM contacts WHERE id=$1", id))
+		if err == sql.ErrNoRows {
+			respond(w, 404, map[string]string{"error": "not_found"})
+			return
+		}
+		if err != nil {
+			respond(w, 503, map[string]string{"error": "contacts_unavailable"})
+			return
+		}
+		respond(w, 200, item)
+		return
+	}
+	if r.Method == http.MethodPatch {
+		item, err := scanContact(db.QueryRowContext(ctx, "SELECT "+contactColumns+" FROM contacts WHERE id=$1", id))
+		if err == sql.ErrNoRows {
+			respond(w, 404, map[string]string{"error": "not_found"})
+			return
+		}
+		if err != nil {
+			respond(w, 503, map[string]string{"error": "contacts_unavailable"})
+			return
+		}
+		var body struct {
+			Name        *string         `json:"name"`
+			Email       *string         `json:"email"`
+			TaxID       *string         `json:"tax_id"`
+			ContactType *string         `json:"contact_type"`
+			Status      *string         `json:"status"`
+			Responsible *string         `json:"responsible"`
+			Tags        *[]string       `json:"tags"`
+			Notes       *string         `json:"notes"`
+			Extra       *map[string]any `json:"extra"`
+			Archived    *bool           `json:"archived"`
+		}
+		dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 65536))
+		dec.DisallowUnknownFields()
+		if dec.Decode(&body) != nil || dec.Decode(new(any)) != io.EOF {
+			respond(w, 400, map[string]string{"error": "invalid_contact"})
+			return
+		}
+		if body.Name != nil {
+			item.Name = strings.TrimSpace(*body.Name)
+		}
+		if body.Email != nil {
+			item.Email = strings.TrimSpace(*body.Email)
+		}
+		if body.TaxID != nil {
+			item.TaxID = strings.TrimSpace(*body.TaxID)
+		}
+		if body.ContactType != nil {
+			item.ContactType = strings.TrimSpace(*body.ContactType)
+		}
+		if body.Status != nil {
+			item.Status = strings.TrimSpace(*body.Status)
+		}
+		if body.Responsible != nil {
+			item.Responsible = strings.TrimSpace(*body.Responsible)
+		}
+		if body.Tags != nil {
+			item.Tags = pq.StringArray(*body.Tags)
+		}
+		if body.Notes != nil {
+			item.Notes = *body.Notes
+		}
+		if body.Extra != nil {
+			item.Extra = *body.Extra
+		}
+		if body.Archived != nil {
+			item.Archived = *body.Archived
+		}
+		if len(item.Name) > 160 || len(item.Email) > 254 || len(item.TaxID) > 32 || len(item.ContactType) > 40 || len(item.Status) > 40 || len(item.Responsible) > 160 || len(item.Tags) > 30 || len(item.Notes) > 20000 {
+			respond(w, 400, map[string]string{"error": "invalid_contact"})
+			return
+		}
+		extra, _ := json.Marshal(item.Extra)
+		item, err = scanContact(db.QueryRowContext(ctx, `UPDATE contacts SET name=$2,email=$3,tax_id=$4,contact_type=$5,status=$6,responsible=$7,tags=$8,notes=$9,extra=$10,archived=$11,updated_at=now() WHERE id=$1 RETURNING `+contactColumns, id, item.Name, item.Email, item.TaxID, item.ContactType, item.Status, item.Responsible, pq.Array(item.Tags), item.Notes, string(extra), item.Archived))
+		if err != nil {
+			respond(w, 503, map[string]string{"error": "contact_not_saved"})
+			return
+		}
+		respond(w, 200, item)
+		return
+	}
+	w.Header().Set("Allow", "GET, PATCH")
+	respond(w, 405, map[string]string{"error": "method_not_allowed"})
+}
+
