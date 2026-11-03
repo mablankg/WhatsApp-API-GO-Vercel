@@ -36,6 +36,7 @@ Todos os endpoints exigem `Authorization: Bearer SEU_TOKEN`. Respostas usam `Cac
 | GET | `/v1/commands/{id}` | Resultado do comando |
 | GET | `/v1/messages?after=0` | Até 100 mensagens recebidas, com cursor `next_after` |
 | GET | `/v1/groups` | Lista os grupos sincronizados da conta |
+| POST | `/v1/groups/sync` | Solicita sincronização imediata dos grupos com o WhatsApp |
 | POST | `/v1/groups` | Cria um grupo com nome e participantes |
 | POST | `/v1/groups/{group_id}/messages` | Enfileira texto para um grupo |
 
@@ -61,3 +62,4 @@ O consumidor deve manter o cursor de recebimento; as mensagens são consultadas 
 ## Verificação
 
 `go test ./...` e `go vet ./...`. Teste real requer acesso ao PostgreSQL DBaaS e pareamento pelo titular do número. A compilação local não valida a disponibilidade do recurso Daemons na conta nem a sessão WhatsApp.
+
