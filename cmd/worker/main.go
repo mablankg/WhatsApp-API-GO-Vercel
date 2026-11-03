@@ -388,8 +388,11 @@ func (w *worker) refreshContacts() (int, error) {
 			continue
 		}
 		name := firstContactName(info.FullName, info.BusinessName, info.PushName, info.FirstName)
-		_, err = tx.ExecContext(ctx, `INSERT INTO contacts(whatsapp_id,phone,name) VALUES($1,$2,$3)
-			ON CONFLICT(phone) DO UPDATE SET name=CASE WHEN contacts.name='' THEN excluded.name ELSE contacts.name END,updated_at=now()`, phoneJID.String(), phoneJID.User, name)
+		_, err = tx.ExecContext(ctx, `INSERT INTO contacts(whatsapp_id,phone,name) VALUES($1,$2,$3) ON CONFLICT DO NOTHING`, phoneJID.String(), phoneJID.User, name)
+		if err != nil {
+			return 0, err
+		}
+		_, err = tx.ExecContext(ctx, `UPDATE contacts SET name=CASE WHEN name='' THEN $2 ELSE name END,updated_at=now() WHERE phone=$1`, phoneJID.User, name)
 		if err != nil {
 			return 0, err
 		}
