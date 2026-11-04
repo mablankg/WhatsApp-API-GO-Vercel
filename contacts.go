@@ -193,7 +193,7 @@ func handleContacts(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 				respond(w, 503, map[string]string{"error": "messages_unavailable"})
 				return
 			}
-			items = append(items, map[string]any{"seq": seq, "id": messageID, "text": text, "timestamp": timestamp, "from_me": fromMe, "media": mediaJSON(mediaID, mediaType, mimeType, fileName, caption, fileSize, duration)})
+			items = append(items, map[string]any{"seq": seq, "id": messageID, "sender": sender, "text": text, "timestamp": timestamp, "from_me": fromMe, "media": mediaJSON(mediaID, mediaType, mimeType, fileName, caption, fileSize, duration)})
 		}
 		respond(w, 200, map[string]any{"messages": items})
 		return

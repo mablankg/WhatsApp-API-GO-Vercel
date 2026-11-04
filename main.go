@@ -200,9 +200,9 @@ func handler(db *sql.DB, token string) http.Handler {
 				respond(w, 400, map[string]string{"error": "invalid_group_id"})
 				return
 			}
-			rows, err := db.QueryContext(ctx, `SELECT recent.seq,recent.message_id,recent.text,recent.timestamp,recent.from_me,
+			rows, err := db.QueryContext(ctx, `SELECT recent.seq,recent.message_id,recent.sender,recent.text,recent.timestamp,recent.from_me,
 				COALESCE(mm.id,0),COALESCE(mm.media_type,''),COALESCE(mm.mime_type,''),COALESCE(mm.file_name,''),COALESCE(mm.caption,''),COALESCE(mm.file_size,0),COALESCE(mm.duration_seconds,0)
-			FROM (SELECT seq,message_id,chat,text,timestamp,from_me FROM messages WHERE chat=$1 ORDER BY seq DESC LIMIT 200) recent
+				FROM (SELECT seq,message_id,chat,sender,text,timestamp,from_me FROM messages WHERE chat=$1 ORDER BY seq DESC LIMIT 200) recent
 			LEFT JOIN message_media mm ON mm.message_id=recent.message_id AND mm.chat=recent.chat ORDER BY recent.seq`, groupID)
 			if err != nil {
 				fail()
@@ -212,17 +212,17 @@ func handler(db *sql.DB, token string) http.Handler {
 			items := []map[string]any{}
 			for rows.Next() {
 				var seq int64
-				var messageID, text string
+				var messageID, sender, text string
 				var timestamp time.Time
 				var fromMe bool
 				var mediaID, fileSize int64
 				var mediaType, mimeType, fileName, caption string
 				var duration int
-				if rows.Scan(&seq, &messageID, &text, &timestamp, &fromMe, &mediaID, &mediaType, &mimeType, &fileName, &caption, &fileSize, &duration) != nil {
+				if rows.Scan(&seq, &messageID, &sender, &text, &timestamp, &fromMe, &mediaID, &mediaType, &mimeType, &fileName, &caption, &fileSize, &duration) != nil {
 					fail()
 					return
 				}
-				items = append(items, map[string]any{"seq": seq, "id": messageID, "text": text, "timestamp": timestamp, "from_me": fromMe, "media": mediaJSON(mediaID, mediaType, mimeType, fileName, caption, fileSize, duration)})
+				items = append(items, map[string]any{"seq": seq, "id": messageID, "sender": sender, "text": text, "timestamp": timestamp, "from_me": fromMe, "media": mediaJSON(mediaID, mediaType, mimeType, fileName, caption, fileSize, duration)})
 			}
 			respond(w, 200, map[string]any{"messages": items})
 		case r.Method == "POST" && (r.URL.Path == "/v1/connect" || r.URL.Path == "/v1/messages"):
