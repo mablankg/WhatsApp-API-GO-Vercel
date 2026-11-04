@@ -346,8 +346,10 @@ func handleContacts(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 			item.Archived = *body.Archived
 		}
 		validPriorities := map[string]bool{"low": true, "normal": true, "high": true, "urgent": true}
-		var validStage bool
-		_ = db.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM attendance_stages WHERE id=$1 AND active=true)", item.AttendanceStage).Scan(&validStage)
+		validStage := item.AttendanceStage == ""
+		if !validStage {
+			_ = db.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM attendance_stages WHERE id=$1 AND active=true)", item.AttendanceStage).Scan(&validStage)
+		}
 		if len(item.Name) > 160 || len(item.Nickname) > 80 || len(item.Email) > 254 || len(item.TaxID) > 32 || len(item.ContactType) > 40 || len(item.Status) > 40 || !validStage || !validPriorities[item.Priority] || len(item.Responsible) > 160 || len(item.Tags) > 30 || len(item.Notes) > 20000 {
 			respond(w, 400, map[string]string{"error": "invalid_contact"})
 			return
