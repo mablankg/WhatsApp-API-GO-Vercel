@@ -69,8 +69,10 @@ CREATE INDEX IF NOT EXISTS commands_pending ON commands(created_at) WHERE status
 CREATE TABLE IF NOT EXISTS messages (
  seq BIGSERIAL PRIMARY KEY, message_id TEXT NOT NULL, chat TEXT NOT NULL,
  sender TEXT NOT NULL, text TEXT NOT NULL, timestamp TIMESTAMPTZ NOT NULL,
+ from_me BOOLEAN NOT NULL DEFAULT false,
  UNIQUE(message_id,chat)
 );
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS from_me BOOLEAN NOT NULL DEFAULT false;
 CREATE TABLE IF NOT EXISTS groups (
  group_id TEXT PRIMARY KEY, name TEXT NOT NULL, topic TEXT NOT NULL DEFAULT '',
  participant_count INTEGER NOT NULL DEFAULT 0,
@@ -82,6 +84,7 @@ CREATE TABLE IF NOT EXISTS contacts (
  whatsapp_id TEXT NOT NULL UNIQUE,
  phone TEXT NOT NULL UNIQUE,
  name TEXT NOT NULL DEFAULT '',
+ nickname TEXT NOT NULL DEFAULT '',
  email TEXT NOT NULL DEFAULT '',
  tax_id TEXT NOT NULL DEFAULT '',
  contact_type TEXT NOT NULL DEFAULT 'lead',
@@ -95,6 +98,7 @@ CREATE TABLE IF NOT EXISTS contacts (
  archived BOOLEAN NOT NULL DEFAULT false,
  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+ALTER TABLE contacts ADD COLUMN IF NOT EXISTS nickname TEXT NOT NULL DEFAULT '';
 CREATE INDEX IF NOT EXISTS contacts_name_search ON contacts(lower(name));
 CREATE INDEX IF NOT EXISTS contacts_last_contact ON contacts(last_contact_at DESC);
 INSERT INTO contacts(whatsapp_id,phone,first_contact_at,last_contact_at)

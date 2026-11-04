@@ -13,12 +13,14 @@ import (
 )
 
 var contactIDPattern = regexp.MustCompile(`^[1-9][0-9]{0,18}$`)
+var contactMessagesPattern = regexp.MustCompile(`^/v1/contacts/([1-9][0-9]{0,18})/messages$`)
 
 type contact struct {
 	ID             int64          `json:"id"`
 	WhatsAppID     string         `json:"whatsapp_id"`
 	Phone          string         `json:"phone"`
 	Name           string         `json:"name"`
+	Nickname       string         `json:"nickname"`
 	Email          string         `json:"email"`
 	TaxID          string         `json:"tax_id"`
 	ContactType    string         `json:"contact_type"`
@@ -33,12 +35,12 @@ type contact struct {
 	UpdatedAt      time.Time      `json:"updated_at"`
 }
 
-const contactColumns = `id,whatsapp_id,phone,name,email,tax_id,contact_type,status,responsible,tags,notes,extra,first_contact_at,last_contact_at,archived,updated_at`
+const contactColumns = `id,whatsapp_id,phone,name,nickname,email,tax_id,contact_type,status,responsible,tags,notes,extra,first_contact_at,last_contact_at,archived,updated_at`
 
 func scanContact(scanner interface{ Scan(...any) error }) (contact, error) {
 	var item contact
 	var extra []byte
-	err := scanner.Scan(&item.ID, &item.WhatsAppID, &item.Phone, &item.Name, &item.Email, &item.TaxID, &item.ContactType, &item.Status, &item.Responsible, &item.Tags, &item.Notes, &extra, &item.FirstContactAt, &item.LastContactAt, &item.Archived, &item.UpdatedAt)
+	err := scanner.Scan(&item.ID, &item.WhatsAppID, &item.Phone, &item.Name, &item.Nickname, &item.Email, &item.TaxID, &item.ContactType, &item.Status, &item.Responsible, &item.Tags, &item.Notes, &extra, &item.FirstContactAt, &item.LastContactAt, &item.Archived, &item.UpdatedAt)
 	if len(extra) > 0 {
 		_ = json.Unmarshal(extra, &item.Extra)
 	}
@@ -53,6 +55,44 @@ func scanContact(scanner interface{ Scan(...any) error }) (contact, error) {
 
 func handleContacts(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 	ctx := r.Context()
+	if match := contactMessagesPattern.FindStringSubmatch(r.URL.Path); match != nil {
+		if r.Method != http.MethodGet {
+			w.Header().Set("Allow", "GET")
+			respond(w, 405, map[string]string{"error": "method_not_allowed"})
+			return
+		}
+		var phone string
+		if err := db.QueryRowContext(ctx, "SELECT phone FROM contacts WHERE id=$1", match[1]).Scan(&phone); err == sql.ErrNoRows {
+			respond(w, 404, map[string]string{"error": "not_found"})
+			return
+		} else if err != nil {
+			respond(w, 503, map[string]string{"error": "contacts_unavailable"})
+			return
+		}
+		rows, err := db.QueryContext(ctx, `SELECT seq,message_id,chat,sender,text,timestamp,from_me FROM (
+			SELECT seq,message_id,chat,sender,text,timestamp,from_me FROM messages
+			WHERE chat=$1 OR sender=$1 ORDER BY seq DESC LIMIT 200
+		) recent ORDER BY seq`, phone+"@s.whatsapp.net")
+		if err != nil {
+			respond(w, 503, map[string]string{"error": "messages_unavailable"})
+			return
+		}
+		defer rows.Close()
+		items := []map[string]any{}
+		for rows.Next() {
+			var seq int64
+			var messageID, chat, sender, text string
+			var timestamp time.Time
+			var fromMe bool
+			if err = rows.Scan(&seq, &messageID, &chat, &sender, &text, &timestamp, &fromMe); err != nil {
+				respond(w, 503, map[string]string{"error": "messages_unavailable"})
+				return
+			}
+			items = append(items, map[string]any{"seq": seq, "id": messageID, "text": text, "timestamp": timestamp, "from_me": fromMe})
+		}
+		respond(w, 200, map[string]any{"messages": items})
+		return
+	}
 	if r.URL.Path == "/v1/contacts/sync" && r.Method == http.MethodPost {
 		id, err := enqueueRaw(ctx, db, "sync_contacts", []byte(`{}`))
 		if err != nil {
@@ -66,7 +106,7 @@ func handleContacts(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 		q := strings.TrimSpace(r.URL.Query().Get("q"))
 		archived := r.URL.Query().Get("archived") == "true"
 		rows, err := db.QueryContext(ctx, `SELECT `+contactColumns+` FROM contacts
-			WHERE archived=$1 AND ($2='' OR name ILIKE '%'||$2||'%' OR phone LIKE '%'||$2||'%' OR email ILIKE '%'||$2||'%')
+			WHERE archived=$1 AND ($2='' OR name ILIKE '%'||$2||'%' OR nickname ILIKE '%'||$2||'%' OR phone LIKE '%'||$2||'%' OR email ILIKE '%'||$2||'%')
 			ORDER BY last_contact_at DESC,id DESC LIMIT 200`, archived, q)
 		if err != nil {
 			respond(w, 503, map[string]string{"error": "contacts_unavailable"})
@@ -142,6 +182,7 @@ func handleContacts(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 		}
 		var body struct {
 			Name        *string         `json:"name"`
+			Nickname    *string         `json:"nickname"`
 			Email       *string         `json:"email"`
 			TaxID       *string         `json:"tax_id"`
 			ContactType *string         `json:"contact_type"`
@@ -160,6 +201,9 @@ func handleContacts(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 		}
 		if body.Name != nil {
 			item.Name = strings.TrimSpace(*body.Name)
+		}
+		if body.Nickname != nil {
+			item.Nickname = strings.TrimSpace(*body.Nickname)
 		}
 		if body.Email != nil {
 			item.Email = strings.TrimSpace(*body.Email)
@@ -188,12 +232,12 @@ func handleContacts(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 		if body.Archived != nil {
 			item.Archived = *body.Archived
 		}
-		if len(item.Name) > 160 || len(item.Email) > 254 || len(item.TaxID) > 32 || len(item.ContactType) > 40 || len(item.Status) > 40 || len(item.Responsible) > 160 || len(item.Tags) > 30 || len(item.Notes) > 20000 {
+		if len(item.Name) > 160 || len(item.Nickname) > 80 || len(item.Email) > 254 || len(item.TaxID) > 32 || len(item.ContactType) > 40 || len(item.Status) > 40 || len(item.Responsible) > 160 || len(item.Tags) > 30 || len(item.Notes) > 20000 {
 			respond(w, 400, map[string]string{"error": "invalid_contact"})
 			return
 		}
 		extra, _ := json.Marshal(item.Extra)
-		item, err = scanContact(db.QueryRowContext(ctx, `UPDATE contacts SET name=$2,email=$3,tax_id=$4,contact_type=$5,status=$6,responsible=$7,tags=$8,notes=$9,extra=$10,archived=$11,updated_at=now() WHERE id=$1 RETURNING `+contactColumns, id, item.Name, item.Email, item.TaxID, item.ContactType, item.Status, item.Responsible, pq.Array(item.Tags), item.Notes, string(extra), item.Archived))
+		item, err = scanContact(db.QueryRowContext(ctx, `UPDATE contacts SET name=$2,nickname=$3,email=$4,tax_id=$5,contact_type=$6,status=$7,responsible=$8,tags=$9,notes=$10,extra=$11,archived=$12,updated_at=now() WHERE id=$1 RETURNING `+contactColumns, id, item.Name, item.Nickname, item.Email, item.TaxID, item.ContactType, item.Status, item.Responsible, pq.Array(item.Tags), item.Notes, string(extra), item.Archived))
 		if err != nil {
 			respond(w, 503, map[string]string{"error": "contact_not_saved"})
 			return

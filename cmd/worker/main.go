@@ -238,6 +238,7 @@ func (w *worker) next() {
 			status = "unknown"
 		} else {
 			result["message_id"] = response.ID
+			_, _ = w.db.ExecContext(ctx, `INSERT INTO messages(message_id,chat,sender,text,timestamp,from_me) VALUES($1,$2,$3,$4,now(),true) ON CONFLICT DO NOTHING`, response.ID, types.NewJID(p.To, types.DefaultUserServer).String(), "me", p.Text)
 		}
 	case "create_group":
 		var p struct {
