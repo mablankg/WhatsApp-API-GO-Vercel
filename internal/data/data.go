@@ -171,6 +171,20 @@ INSERT INTO attendance_stages(id,name,color,position) VALUES
  ('waiting_action','Aguardando providência','#e47b21',40),
  ('finished','Finalizados','#5d9b75',50)
 ON CONFLICT(id) DO NOTHING;
+CREATE TABLE IF NOT EXISTS lawyers (
+ id BIGSERIAL PRIMARY KEY,
+ name TEXT NOT NULL,
+ color TEXT NOT NULL DEFAULT '#177447',
+ active BOOLEAN NOT NULL DEFAULT true,
+ created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+ updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS lawyers_name_key ON lawyers(lower(name));
+ALTER TABLE contacts ADD COLUMN IF NOT EXISTS lawyer_id BIGINT;
+ALTER TABLE groups ADD COLUMN IF NOT EXISTS lawyer_id BIGINT;
+ALTER TABLE groups ADD COLUMN IF NOT EXISTS archived BOOLEAN NOT NULL DEFAULT false;
+CREATE INDEX IF NOT EXISTS contacts_lawyer ON contacts(account_id,lawyer_id) WHERE archived=false;
+CREATE INDEX IF NOT EXISTS groups_lawyer ON groups(account_id,lawyer_id) WHERE archived=false;
 CREATE INDEX IF NOT EXISTS contacts_name_search ON contacts(lower(name));
 CREATE INDEX IF NOT EXISTS contacts_last_contact ON contacts(last_contact_at DESC);
 CREATE TABLE IF NOT EXISTS entity_comments (
@@ -197,6 +211,7 @@ ALTER TABLE message_media ENABLE ROW LEVEL SECURITY;
 ALTER TABLE groups ENABLE ROW LEVEL SECURITY;
 ALTER TABLE contacts ENABLE ROW LEVEL SECURITY;
 ALTER TABLE attendance_stages ENABLE ROW LEVEL SECURITY;
+ALTER TABLE lawyers ENABLE ROW LEVEL SECURITY;
 ALTER TABLE entity_comments ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON SCHEMA wa_private FROM PUBLIC;
 `

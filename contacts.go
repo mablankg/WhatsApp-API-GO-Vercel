@@ -31,6 +31,9 @@ type contact struct {
 	Status          string         `json:"status"`
 	AttendanceStage string         `json:"attendance_stage"`
 	Priority        string         `json:"priority"`
+	LawyerID        int64          `json:"lawyer_id"`
+	LawyerName      string         `json:"lawyer_name"`
+	LawyerColor     string         `json:"lawyer_color"`
 	Responsible     string         `json:"responsible"`
 	Tags            pq.StringArray `json:"tags"`
 	Notes           string         `json:"notes"`
@@ -41,12 +44,12 @@ type contact struct {
 	UpdatedAt       time.Time      `json:"updated_at"`
 }
 
-const contactColumns = `id,whatsapp_id,phone,name,nickname,email,tax_id,contact_type,status,attendance_stage,priority,responsible,tags,notes,extra,first_contact_at,last_contact_at,archived,updated_at`
+const contactColumns = `id,whatsapp_id,phone,name,nickname,email,tax_id,contact_type,status,attendance_stage,priority,COALESCE(lawyer_id,0),COALESCE((SELECT name FROM lawyers WHERE id=contacts.lawyer_id),''),COALESCE((SELECT color FROM lawyers WHERE id=contacts.lawyer_id),''),responsible,tags,notes,extra,first_contact_at,last_contact_at,archived,updated_at`
 
 func scanContact(scanner interface{ Scan(...any) error }) (contact, error) {
 	var item contact
 	var extra []byte
-	err := scanner.Scan(&item.ID, &item.WhatsAppID, &item.Phone, &item.Name, &item.Nickname, &item.Email, &item.TaxID, &item.ContactType, &item.Status, &item.AttendanceStage, &item.Priority, &item.Responsible, &item.Tags, &item.Notes, &extra, &item.FirstContactAt, &item.LastContactAt, &item.Archived, &item.UpdatedAt)
+	err := scanner.Scan(&item.ID, &item.WhatsAppID, &item.Phone, &item.Name, &item.Nickname, &item.Email, &item.TaxID, &item.ContactType, &item.Status, &item.AttendanceStage, &item.Priority, &item.LawyerID, &item.LawyerName, &item.LawyerColor, &item.Responsible, &item.Tags, &item.Notes, &extra, &item.FirstContactAt, &item.LastContactAt, &item.Archived, &item.UpdatedAt)
 	if len(extra) > 0 {
 		_ = json.Unmarshal(extra, &item.Extra)
 	}
@@ -295,6 +298,7 @@ func handleContacts(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 			Status          *string         `json:"status"`
 			AttendanceStage *string         `json:"attendance_stage"`
 			Priority        *string         `json:"priority"`
+			LawyerID        *int64          `json:"lawyer_id"`
 			Responsible     *string         `json:"responsible"`
 			Tags            *[]string       `json:"tags"`
 			Notes           *string         `json:"notes"`
@@ -331,6 +335,9 @@ func handleContacts(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 		if body.Priority != nil {
 			item.Priority = strings.TrimSpace(*body.Priority)
 		}
+		if body.LawyerID != nil {
+			item.LawyerID = *body.LawyerID
+		}
 		if body.Responsible != nil {
 			item.Responsible = strings.TrimSpace(*body.Responsible)
 		}
@@ -347,16 +354,20 @@ func handleContacts(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 			item.Archived = *body.Archived
 		}
 		validPriorities := map[string]bool{"low": true, "normal": true, "high": true, "urgent": true}
+		validLawyer := item.LawyerID == 0
+		if !validLawyer {
+			_ = db.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM lawyers WHERE id=$1 AND active=true)", item.LawyerID).Scan(&validLawyer)
+		}
 		validStage := item.AttendanceStage == ""
 		if !validStage {
 			_ = db.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM attendance_stages WHERE id=$1 AND active=true)", item.AttendanceStage).Scan(&validStage)
 		}
-		if len(item.Name) > 160 || len(item.Nickname) > 80 || len(item.Email) > 254 || len(item.TaxID) > 32 || len(item.ContactType) > 40 || len(item.Status) > 40 || !validStage || !validPriorities[item.Priority] || len(item.Responsible) > 160 || len(item.Tags) > 30 || len(item.Notes) > 20000 {
+		if len(item.Name) > 160 || len(item.Nickname) > 80 || len(item.Email) > 254 || len(item.TaxID) > 32 || len(item.ContactType) > 40 || len(item.Status) > 40 || !validStage || !validPriorities[item.Priority] || !validLawyer || len(item.Responsible) > 160 || len(item.Tags) > 30 || len(item.Notes) > 20000 {
 			respond(w, 400, map[string]string{"error": "invalid_contact"})
 			return
 		}
 		extra, _ := json.Marshal(item.Extra)
-		item, err = scanContact(db.QueryRowContext(ctx, `UPDATE contacts SET name=$3,nickname=$4,email=$5,tax_id=$6,contact_type=$7,status=$8,attendance_stage=$9,priority=$10,responsible=$11,tags=$12,notes=$13,extra=$14,archived=$15,updated_at=now() WHERE id=$1 AND account_id=$2 RETURNING `+contactColumns, id, requestAccount(r), item.Name, item.Nickname, item.Email, item.TaxID, item.ContactType, item.Status, item.AttendanceStage, item.Priority, item.Responsible, pq.Array(item.Tags), item.Notes, string(extra), item.Archived))
+		item, err = scanContact(db.QueryRowContext(ctx, `UPDATE contacts SET name=$3,nickname=$4,email=$5,tax_id=$6,contact_type=$7,status=$8,attendance_stage=$9,priority=$10,lawyer_id=NULLIF($11,0),responsible=$12,tags=$13,notes=$14,extra=$15,archived=$16,updated_at=now() WHERE id=$1 AND account_id=$2 RETURNING `+contactColumns, id, requestAccount(r), item.Name, item.Nickname, item.Email, item.TaxID, item.ContactType, item.Status, item.AttendanceStage, item.Priority, item.LawyerID, item.Responsible, pq.Array(item.Tags), item.Notes, string(extra), item.Archived))
 		if err != nil {
 			respond(w, 503, map[string]string{"error": "contact_not_saved"})
 			return

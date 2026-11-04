@@ -65,6 +65,10 @@ func handler(db *sql.DB, token string) http.Handler {
 			handleAccounts(w, r, db)
 			return
 		}
+		if strings.HasPrefix(r.URL.Path, "/v1/lawyers") {
+			handleLawyers(w, r, db)
+			return
+		}
 		if strings.HasPrefix(r.URL.Path, "/v1/contacts") {
 			handleContacts(w, r, db)
 			return
@@ -114,7 +118,7 @@ func handler(db *sql.DB, token string) http.Handler {
 				w.Write(png)
 			}
 		case r.Method == "GET" && r.URL.Path == "/v1/groups":
-			rows, err := db.QueryContext(ctx, "SELECT group_id,name,topic,participant_count,is_announce,attendance_stage,priority,updated_at FROM groups WHERE account_id=$1 ORDER BY lower(name),group_id", requestAccount(r))
+			rows, err := db.QueryContext(ctx, `SELECT group_id,name,topic,participant_count,is_announce,attendance_stage,priority,updated_at,COALESCE(lawyer_id,0),COALESCE((SELECT name FROM lawyers WHERE id=groups.lawyer_id),''),COALESCE((SELECT color FROM lawyers WHERE id=groups.lawyer_id),''),archived FROM groups WHERE account_id=$1 AND archived=false ORDER BY lower(name),group_id`, requestAccount(r))
 			if err != nil {
 				fail()
 				return
@@ -122,15 +126,17 @@ func handler(db *sql.DB, token string) http.Handler {
 			defer rows.Close()
 			items := []map[string]any{}
 			for rows.Next() {
-				var id, name, topic, stage, priority string
+				var id, name, topic, stage, priority, lawyerName, lawyerColor string
 				var count int
+				var lawyerID int64
 				var announce bool
+				var archived bool
 				var updated time.Time
-				if rows.Scan(&id, &name, &topic, &count, &announce, &stage, &priority, &updated) != nil {
+				if rows.Scan(&id, &name, &topic, &count, &announce, &stage, &priority, &updated, &lawyerID, &lawyerName, &lawyerColor, &archived) != nil {
 					fail()
 					return
 				}
-				items = append(items, map[string]any{"id": id, "name": name, "topic": topic, "participant_count": count, "is_announce": announce, "attendance_stage": stage, "priority": priority, "updated_at": updated})
+				items = append(items, map[string]any{"id": id, "name": name, "topic": topic, "participant_count": count, "is_announce": announce, "attendance_stage": stage, "priority": priority, "lawyer_id": lawyerID, "lawyer_name": lawyerName, "lawyer_color": lawyerColor, "archived": archived, "updated_at": updated})
 			}
 			if rows.Err() != nil {
 				fail()
@@ -188,6 +194,8 @@ func handler(db *sql.DB, token string) http.Handler {
 			var body struct {
 				AttendanceStage string `json:"attendance_stage"`
 				Priority        string `json:"priority"`
+				LawyerID        int64  `json:"lawyer_id"`
+				Archived        bool   `json:"archived"`
 			}
 			dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096))
 			dec.DisallowUnknownFields()
@@ -196,13 +204,17 @@ func handler(db *sql.DB, token string) http.Handler {
 				return
 			}
 			validPriority := map[string]bool{"low": true, "normal": true, "high": true, "urgent": true}[body.Priority]
+			validLawyer := body.LawyerID == 0
+			if !validLawyer {
+				_ = db.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM lawyers WHERE id=$1 AND active=true)", body.LawyerID).Scan(&validLawyer)
+			}
 			var validStage bool
 			_ = db.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM attendance_stages WHERE id=$1 AND active=true)", body.AttendanceStage).Scan(&validStage)
-			if !validStage || !validPriority {
+			if !validStage || !validPriority || !validLawyer {
 				respond(w, 400, map[string]string{"error": "invalid_group_classification"})
 				return
 			}
-			result, err := db.ExecContext(ctx, "UPDATE groups SET attendance_stage=$3,priority=$4 WHERE account_id=$1 AND group_id=$2", requestAccount(r), groupID, body.AttendanceStage, body.Priority)
+			result, err := db.ExecContext(ctx, "UPDATE groups SET attendance_stage=$3,priority=$4,lawyer_id=NULLIF($5,0),archived=$6 WHERE account_id=$1 AND group_id=$2", requestAccount(r), groupID, body.AttendanceStage, body.Priority, body.LawyerID, body.Archived)
 			if err != nil {
 				fail()
 				return
@@ -212,7 +224,7 @@ func handler(db *sql.DB, token string) http.Handler {
 				respond(w, 404, map[string]string{"error": "not_found"})
 				return
 			}
-			respond(w, 200, map[string]any{"id": groupID, "attendance_stage": body.AttendanceStage, "priority": body.Priority})
+			respond(w, 200, map[string]any{"id": groupID, "attendance_stage": body.AttendanceStage, "priority": body.Priority, "lawyer_id": body.LawyerID, "archived": body.Archived})
 		case r.Method == "POST" && isGroupMessagePath(r.URL.Path):
 			groupID := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/groups/"), "/messages")
 			if !groupPattern.MatchString(groupID) {
