@@ -16,31 +16,33 @@ var contactIDPattern = regexp.MustCompile(`^[1-9][0-9]{0,18}$`)
 var contactMessagesPattern = regexp.MustCompile(`^/v1/contacts/([1-9][0-9]{0,18})/messages$`)
 
 type contact struct {
-	ID             int64          `json:"id"`
-	WhatsAppID     string         `json:"whatsapp_id"`
-	Phone          string         `json:"phone"`
-	Name           string         `json:"name"`
-	Nickname       string         `json:"nickname"`
-	Email          string         `json:"email"`
-	TaxID          string         `json:"tax_id"`
-	ContactType    string         `json:"contact_type"`
-	Status         string         `json:"status"`
-	Responsible    string         `json:"responsible"`
-	Tags           pq.StringArray `json:"tags"`
-	Notes          string         `json:"notes"`
-	Extra          map[string]any `json:"extra"`
-	FirstContactAt time.Time      `json:"first_contact_at"`
-	LastContactAt  time.Time      `json:"last_contact_at"`
-	Archived       bool           `json:"archived"`
-	UpdatedAt      time.Time      `json:"updated_at"`
+	ID              int64          `json:"id"`
+	WhatsAppID      string         `json:"whatsapp_id"`
+	Phone           string         `json:"phone"`
+	Name            string         `json:"name"`
+	Nickname        string         `json:"nickname"`
+	Email           string         `json:"email"`
+	TaxID           string         `json:"tax_id"`
+	ContactType     string         `json:"contact_type"`
+	Status          string         `json:"status"`
+	AttendanceStage string         `json:"attendance_stage"`
+	Priority        string         `json:"priority"`
+	Responsible     string         `json:"responsible"`
+	Tags            pq.StringArray `json:"tags"`
+	Notes           string         `json:"notes"`
+	Extra           map[string]any `json:"extra"`
+	FirstContactAt  time.Time      `json:"first_contact_at"`
+	LastContactAt   time.Time      `json:"last_contact_at"`
+	Archived        bool           `json:"archived"`
+	UpdatedAt       time.Time      `json:"updated_at"`
 }
 
-const contactColumns = `id,whatsapp_id,phone,name,nickname,email,tax_id,contact_type,status,responsible,tags,notes,extra,first_contact_at,last_contact_at,archived,updated_at`
+const contactColumns = `id,whatsapp_id,phone,name,nickname,email,tax_id,contact_type,status,attendance_stage,priority,responsible,tags,notes,extra,first_contact_at,last_contact_at,archived,updated_at`
 
 func scanContact(scanner interface{ Scan(...any) error }) (contact, error) {
 	var item contact
 	var extra []byte
-	err := scanner.Scan(&item.ID, &item.WhatsAppID, &item.Phone, &item.Name, &item.Nickname, &item.Email, &item.TaxID, &item.ContactType, &item.Status, &item.Responsible, &item.Tags, &item.Notes, &extra, &item.FirstContactAt, &item.LastContactAt, &item.Archived, &item.UpdatedAt)
+	err := scanner.Scan(&item.ID, &item.WhatsAppID, &item.Phone, &item.Name, &item.Nickname, &item.Email, &item.TaxID, &item.ContactType, &item.Status, &item.AttendanceStage, &item.Priority, &item.Responsible, &item.Tags, &item.Notes, &extra, &item.FirstContactAt, &item.LastContactAt, &item.Archived, &item.UpdatedAt)
 	if len(extra) > 0 {
 		_ = json.Unmarshal(extra, &item.Extra)
 	}
@@ -188,17 +190,19 @@ func handleContacts(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 			return
 		}
 		var body struct {
-			Name        *string         `json:"name"`
-			Nickname    *string         `json:"nickname"`
-			Email       *string         `json:"email"`
-			TaxID       *string         `json:"tax_id"`
-			ContactType *string         `json:"contact_type"`
-			Status      *string         `json:"status"`
-			Responsible *string         `json:"responsible"`
-			Tags        *[]string       `json:"tags"`
-			Notes       *string         `json:"notes"`
-			Extra       *map[string]any `json:"extra"`
-			Archived    *bool           `json:"archived"`
+			Name            *string         `json:"name"`
+			Nickname        *string         `json:"nickname"`
+			Email           *string         `json:"email"`
+			TaxID           *string         `json:"tax_id"`
+			ContactType     *string         `json:"contact_type"`
+			Status          *string         `json:"status"`
+			AttendanceStage *string         `json:"attendance_stage"`
+			Priority        *string         `json:"priority"`
+			Responsible     *string         `json:"responsible"`
+			Tags            *[]string       `json:"tags"`
+			Notes           *string         `json:"notes"`
+			Extra           *map[string]any `json:"extra"`
+			Archived        *bool           `json:"archived"`
 		}
 		dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 65536))
 		dec.DisallowUnknownFields()
@@ -224,6 +228,12 @@ func handleContacts(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 		if body.Status != nil {
 			item.Status = strings.TrimSpace(*body.Status)
 		}
+		if body.AttendanceStage != nil {
+			item.AttendanceStage = strings.TrimSpace(*body.AttendanceStage)
+		}
+		if body.Priority != nil {
+			item.Priority = strings.TrimSpace(*body.Priority)
+		}
 		if body.Responsible != nil {
 			item.Responsible = strings.TrimSpace(*body.Responsible)
 		}
@@ -239,12 +249,14 @@ func handleContacts(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 		if body.Archived != nil {
 			item.Archived = *body.Archived
 		}
-		if len(item.Name) > 160 || len(item.Nickname) > 80 || len(item.Email) > 254 || len(item.TaxID) > 32 || len(item.ContactType) > 40 || len(item.Status) > 40 || len(item.Responsible) > 160 || len(item.Tags) > 30 || len(item.Notes) > 20000 {
+		validStages := map[string]bool{"new": true, "in_progress": true, "waiting_client": true, "waiting_action": true, "finished": true}
+		validPriorities := map[string]bool{"low": true, "normal": true, "high": true, "urgent": true}
+		if len(item.Name) > 160 || len(item.Nickname) > 80 || len(item.Email) > 254 || len(item.TaxID) > 32 || len(item.ContactType) > 40 || len(item.Status) > 40 || !validStages[item.AttendanceStage] || !validPriorities[item.Priority] || len(item.Responsible) > 160 || len(item.Tags) > 30 || len(item.Notes) > 20000 {
 			respond(w, 400, map[string]string{"error": "invalid_contact"})
 			return
 		}
 		extra, _ := json.Marshal(item.Extra)
-		item, err = scanContact(db.QueryRowContext(ctx, `UPDATE contacts SET name=$2,nickname=$3,email=$4,tax_id=$5,contact_type=$6,status=$7,responsible=$8,tags=$9,notes=$10,extra=$11,archived=$12,updated_at=now() WHERE id=$1 RETURNING `+contactColumns, id, item.Name, item.Nickname, item.Email, item.TaxID, item.ContactType, item.Status, item.Responsible, pq.Array(item.Tags), item.Notes, string(extra), item.Archived))
+		item, err = scanContact(db.QueryRowContext(ctx, `UPDATE contacts SET name=$2,nickname=$3,email=$4,tax_id=$5,contact_type=$6,status=$7,attendance_stage=$8,priority=$9,responsible=$10,tags=$11,notes=$12,extra=$13,archived=$14,updated_at=now() WHERE id=$1 RETURNING `+contactColumns, id, item.Name, item.Nickname, item.Email, item.TaxID, item.ContactType, item.Status, item.AttendanceStage, item.Priority, item.Responsible, pq.Array(item.Tags), item.Notes, string(extra), item.Archived))
 		if err != nil {
 			respond(w, 503, map[string]string{"error": "contact_not_saved"})
 			return

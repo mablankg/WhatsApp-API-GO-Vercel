@@ -104,6 +104,8 @@ CREATE TABLE IF NOT EXISTS contacts (
  tax_id TEXT NOT NULL DEFAULT '',
  contact_type TEXT NOT NULL DEFAULT 'lead',
  status TEXT NOT NULL DEFAULT 'active',
+ attendance_stage TEXT NOT NULL DEFAULT 'new',
+ priority TEXT NOT NULL DEFAULT 'normal',
  responsible TEXT NOT NULL DEFAULT '',
  tags TEXT[] NOT NULL DEFAULT '{}',
  notes TEXT NOT NULL DEFAULT '',
@@ -114,6 +116,8 @@ CREATE TABLE IF NOT EXISTS contacts (
  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 ALTER TABLE contacts ADD COLUMN IF NOT EXISTS nickname TEXT NOT NULL DEFAULT '';
+ALTER TABLE contacts ADD COLUMN IF NOT EXISTS attendance_stage TEXT NOT NULL DEFAULT 'new';
+ALTER TABLE contacts ADD COLUMN IF NOT EXISTS priority TEXT NOT NULL DEFAULT 'normal';
 CREATE INDEX IF NOT EXISTS contacts_name_search ON contacts(lower(name));
 CREATE INDEX IF NOT EXISTS contacts_last_contact ON contacts(last_contact_at DESC);
 CREATE TABLE IF NOT EXISTS entity_comments (
