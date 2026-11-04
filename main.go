@@ -104,7 +104,7 @@ func handler(db *sql.DB, token string) http.Handler {
 			w.Header().Set("Content-Type", "image/png")
 			w.Write(png)
 		case r.Method == "GET" && r.URL.Path == "/v1/groups":
-			rows, err := db.QueryContext(ctx, "SELECT group_id,name,topic,participant_count,is_announce,updated_at FROM groups ORDER BY lower(name),group_id")
+			rows, err := db.QueryContext(ctx, "SELECT group_id,name,topic,participant_count,is_announce,attendance_stage,priority,updated_at FROM groups ORDER BY lower(name),group_id")
 			if err != nil {
 				fail()
 				return
@@ -112,15 +112,15 @@ func handler(db *sql.DB, token string) http.Handler {
 			defer rows.Close()
 			items := []map[string]any{}
 			for rows.Next() {
-				var id, name, topic string
+				var id, name, topic, stage, priority string
 				var count int
 				var announce bool
 				var updated time.Time
-				if rows.Scan(&id, &name, &topic, &count, &announce, &updated) != nil {
+				if rows.Scan(&id, &name, &topic, &count, &announce, &stage, &priority, &updated) != nil {
 					fail()
 					return
 				}
-				items = append(items, map[string]any{"id": id, "name": name, "topic": topic, "participant_count": count, "is_announce": announce, "updated_at": updated})
+				items = append(items, map[string]any{"id": id, "name": name, "topic": topic, "participant_count": count, "is_announce": announce, "attendance_stage": stage, "priority": priority, "updated_at": updated})
 			}
 			if rows.Err() != nil {
 				fail()
@@ -169,6 +169,40 @@ func handler(db *sql.DB, token string) http.Handler {
 				return
 			}
 			respond(w, 202, map[string]string{"id": id, "status": "pending", "poll": "/v1/commands/" + id})
+		case r.Method == "PATCH" && strings.HasPrefix(r.URL.Path, "/v1/groups/") && !isGroupMessagePath(r.URL.Path):
+			groupID := strings.TrimPrefix(r.URL.Path, "/v1/groups/")
+			if !groupPattern.MatchString(groupID) {
+				respond(w, 400, map[string]string{"error": "invalid_group_id"})
+				return
+			}
+			var body struct {
+				AttendanceStage string `json:"attendance_stage"`
+				Priority        string `json:"priority"`
+			}
+			dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096))
+			dec.DisallowUnknownFields()
+			if dec.Decode(&body) != nil || dec.Decode(new(any)) != io.EOF {
+				respond(w, 400, map[string]string{"error": "invalid_group"})
+				return
+			}
+			validPriority := map[string]bool{"low": true, "normal": true, "high": true, "urgent": true}[body.Priority]
+			var validStage bool
+			_ = db.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM attendance_stages WHERE id=$1 AND active=true)", body.AttendanceStage).Scan(&validStage)
+			if !validStage || !validPriority {
+				respond(w, 400, map[string]string{"error": "invalid_group_classification"})
+				return
+			}
+			result, err := db.ExecContext(ctx, "UPDATE groups SET attendance_stage=$2,priority=$3 WHERE group_id=$1", groupID, body.AttendanceStage, body.Priority)
+			if err != nil {
+				fail()
+				return
+			}
+			affected, _ := result.RowsAffected()
+			if affected == 0 {
+				respond(w, 404, map[string]string{"error": "not_found"})
+				return
+			}
+			respond(w, 200, map[string]any{"id": groupID, "attendance_stage": body.AttendanceStage, "priority": body.Priority})
 		case r.Method == "POST" && isGroupMessagePath(r.URL.Path):
 			groupID := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/groups/"), "/messages")
 			if !groupPattern.MatchString(groupID) {
