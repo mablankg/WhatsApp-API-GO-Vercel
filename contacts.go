@@ -1,7 +1,9 @@
 package main
 
 import (
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -14,6 +16,8 @@ import (
 
 var contactIDPattern = regexp.MustCompile(`^[1-9][0-9]{0,18}$`)
 var contactMessagesPattern = regexp.MustCompile(`^/v1/contacts/([1-9][0-9]{0,18})/messages$`)
+var stagePathPattern = regexp.MustCompile(`^/v1/contacts/stages/([a-z0-9_]{1,40})$`)
+var stageColorPattern = regexp.MustCompile(`^#[0-9a-fA-F]{6}$`)
 
 type contact struct {
 	ID              int64          `json:"id"`
@@ -57,6 +61,98 @@ func scanContact(scanner interface{ Scan(...any) error }) (contact, error) {
 
 func handleContacts(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 	ctx := r.Context()
+	if r.URL.Path == "/v1/contacts/stages" {
+		if r.Method == http.MethodGet {
+			rows, err := db.QueryContext(ctx, "SELECT id,name,color,position FROM attendance_stages WHERE active=true ORDER BY position,id")
+			if err != nil {
+				respond(w, 503, map[string]string{"error": "stages_unavailable"})
+				return
+			}
+			defer rows.Close()
+			items := []map[string]any{}
+			for rows.Next() {
+				var id, name, color string
+				var position int
+				if rows.Scan(&id, &name, &color, &position) != nil {
+					respond(w, 503, map[string]string{"error": "stages_unavailable"})
+					return
+				}
+				items = append(items, map[string]any{"id": id, "name": name, "color": color, "position": position})
+			}
+			respond(w, 200, map[string]any{"stages": items})
+			return
+		}
+		if r.Method == http.MethodPost {
+			var body struct {
+				Name  string `json:"name"`
+				Color string `json:"color"`
+			}
+			dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096))
+			dec.DisallowUnknownFields()
+			if dec.Decode(&body) != nil || dec.Decode(new(any)) != io.EOF {
+				respond(w, 400, map[string]string{"error": "invalid_stage"})
+				return
+			}
+			body.Name = strings.TrimSpace(body.Name)
+			body.Color = strings.TrimSpace(body.Color)
+			if len(body.Name) < 1 || len(body.Name) > 60 || !stageColorPattern.MatchString(body.Color) {
+				respond(w, 400, map[string]string{"error": "invalid_stage"})
+				return
+			}
+			random := make([]byte, 8)
+			if _, err := rand.Read(random); err != nil {
+				respond(w, 503, map[string]string{"error": "stage_not_saved"})
+				return
+			}
+			id := "stage_" + hex.EncodeToString(random)
+			var position int
+			err := db.QueryRowContext(ctx, `INSERT INTO attendance_stages(id,name,color,position) VALUES($1,$2,$3,(SELECT COALESCE(max(position),0)+10 FROM attendance_stages)) RETURNING position`, id, body.Name, body.Color).Scan(&position)
+			if err != nil {
+				respond(w, 503, map[string]string{"error": "stage_not_saved"})
+				return
+			}
+			respond(w, 201, map[string]any{"id": id, "name": body.Name, "color": body.Color, "position": position})
+			return
+		}
+		w.Header().Set("Allow", "GET, POST")
+		respond(w, 405, map[string]string{"error": "method_not_allowed"})
+		return
+	}
+	if match := stagePathPattern.FindStringSubmatch(r.URL.Path); match != nil {
+		if r.Method != http.MethodPatch {
+			w.Header().Set("Allow", "PATCH")
+			respond(w, 405, map[string]string{"error": "method_not_allowed"})
+			return
+		}
+		var body struct {
+			Name  string `json:"name"`
+			Color string `json:"color"`
+		}
+		dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096))
+		dec.DisallowUnknownFields()
+		if dec.Decode(&body) != nil || dec.Decode(new(any)) != io.EOF {
+			respond(w, 400, map[string]string{"error": "invalid_stage"})
+			return
+		}
+		body.Name = strings.TrimSpace(body.Name)
+		body.Color = strings.TrimSpace(body.Color)
+		if len(body.Name) < 1 || len(body.Name) > 60 || !stageColorPattern.MatchString(body.Color) {
+			respond(w, 400, map[string]string{"error": "invalid_stage"})
+			return
+		}
+		var position int
+		err := db.QueryRowContext(ctx, "UPDATE attendance_stages SET name=$2,color=$3,updated_at=now() WHERE id=$1 AND active=true RETURNING position", match[1], body.Name, body.Color).Scan(&position)
+		if err == sql.ErrNoRows {
+			respond(w, 404, map[string]string{"error": "not_found"})
+			return
+		}
+		if err != nil {
+			respond(w, 503, map[string]string{"error": "stage_not_saved"})
+			return
+		}
+		respond(w, 200, map[string]any{"id": match[1], "name": body.Name, "color": body.Color, "position": position})
+		return
+	}
 	if match := contactMessagesPattern.FindStringSubmatch(r.URL.Path); match != nil {
 		if r.Method != http.MethodGet {
 			w.Header().Set("Allow", "GET")
@@ -249,9 +345,10 @@ func handleContacts(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 		if body.Archived != nil {
 			item.Archived = *body.Archived
 		}
-		validStages := map[string]bool{"new": true, "in_progress": true, "waiting_client": true, "waiting_action": true, "finished": true}
 		validPriorities := map[string]bool{"low": true, "normal": true, "high": true, "urgent": true}
-		if len(item.Name) > 160 || len(item.Nickname) > 80 || len(item.Email) > 254 || len(item.TaxID) > 32 || len(item.ContactType) > 40 || len(item.Status) > 40 || !validStages[item.AttendanceStage] || !validPriorities[item.Priority] || len(item.Responsible) > 160 || len(item.Tags) > 30 || len(item.Notes) > 20000 {
+		var validStage bool
+		_ = db.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM attendance_stages WHERE id=$1 AND active=true)", item.AttendanceStage).Scan(&validStage)
+		if len(item.Name) > 160 || len(item.Nickname) > 80 || len(item.Email) > 254 || len(item.TaxID) > 32 || len(item.ContactType) > 40 || len(item.Status) > 40 || !validStage || !validPriorities[item.Priority] || len(item.Responsible) > 160 || len(item.Tags) > 30 || len(item.Notes) > 20000 {
 			respond(w, 400, map[string]string{"error": "invalid_contact"})
 			return
 		}

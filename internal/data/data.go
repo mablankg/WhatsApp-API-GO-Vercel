@@ -118,6 +118,22 @@ CREATE TABLE IF NOT EXISTS contacts (
 ALTER TABLE contacts ADD COLUMN IF NOT EXISTS nickname TEXT NOT NULL DEFAULT '';
 ALTER TABLE contacts ADD COLUMN IF NOT EXISTS attendance_stage TEXT NOT NULL DEFAULT 'new';
 ALTER TABLE contacts ADD COLUMN IF NOT EXISTS priority TEXT NOT NULL DEFAULT 'normal';
+CREATE TABLE IF NOT EXISTS attendance_stages (
+ id TEXT PRIMARY KEY,
+ name TEXT NOT NULL,
+ color TEXT NOT NULL DEFAULT '#3f9cd0',
+ position INTEGER NOT NULL DEFAULT 0,
+ active BOOLEAN NOT NULL DEFAULT true,
+ created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+ updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+INSERT INTO attendance_stages(id,name,color,position) VALUES
+ ('new','Novos','#3f9cd0',10),
+ ('in_progress','Em atendimento','#8b6fd6',20),
+ ('waiting_client','Aguardando cliente','#e2a51b',30),
+ ('waiting_action','Aguardando providência','#e47b21',40),
+ ('finished','Finalizados','#5d9b75',50)
+ON CONFLICT(id) DO NOTHING;
 CREATE INDEX IF NOT EXISTS contacts_name_search ON contacts(lower(name));
 CREATE INDEX IF NOT EXISTS contacts_last_contact ON contacts(last_contact_at DESC);
 CREATE TABLE IF NOT EXISTS entity_comments (
@@ -140,6 +156,7 @@ ALTER TABLE messages ENABLE ROW LEVEL SECURITY;
 ALTER TABLE message_media ENABLE ROW LEVEL SECURITY;
 ALTER TABLE groups ENABLE ROW LEVEL SECURITY;
 ALTER TABLE contacts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE attendance_stages ENABLE ROW LEVEL SECURITY;
 ALTER TABLE entity_comments ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON SCHEMA wa_private FROM PUBLIC;
 `
