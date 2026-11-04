@@ -391,12 +391,13 @@ func (w *worker) refreshContacts() (int, error) {
 	if err = rows.Close(); err != nil {
 		return 0, err
 	}
-	tx, err := w.db.BeginTx(ctx, nil)
-	if err != nil {
-		return 0, err
+	type contactImport struct {
+		WhatsAppID string `json:"whatsapp_id"`
+		Phone      string `json:"phone"`
+		Name       string `json:"name"`
 	}
-	defer tx.Rollback()
-	count := 0
+	imports := make([]contactImport, 0, len(items))
+	seen := map[string]bool{}
 	for jid, info := range items {
 		phoneJID := jid
 		if jid.Server == types.HiddenUserServer {
@@ -409,21 +410,43 @@ func (w *worker) refreshContacts() (int, error) {
 		if phoneJID.Server != types.DefaultUserServer || !phonePatternWorker.MatchString(phoneJID.User) {
 			continue
 		}
+		if seen[phoneJID.User] {
+			continue
+		}
+		seen[phoneJID.User] = true
 		name := firstContactName(info.FullName, info.BusinessName, info.PushName, info.FirstName)
-		_, err = tx.ExecContext(ctx, `INSERT INTO contacts(whatsapp_id,phone,name) VALUES($1,$2,$3) ON CONFLICT DO NOTHING`, phoneJID.String(), phoneJID.User, name)
-		if err != nil {
-			return 0, err
-		}
-		_, err = tx.ExecContext(ctx, `UPDATE contacts SET name=CASE WHEN name='' THEN $2 ELSE name END,updated_at=now() WHERE phone=$1`, phoneJID.User, name)
-		if err != nil {
-			return 0, err
-		}
-		count++
+		imports = append(imports, contactImport{WhatsAppID: phoneJID.String(), Phone: phoneJID.User, Name: name})
+	}
+	if len(imports) == 0 {
+		return 0, nil
+	}
+	payload, err := json.Marshal(imports)
+	if err != nil {
+		return 0, err
+	}
+	tx, err := w.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	_, err = tx.ExecContext(ctx, `WITH input AS (
+		SELECT * FROM jsonb_to_recordset($1::jsonb) AS x(whatsapp_id text,phone text,name text)
+	) INSERT INTO contacts(whatsapp_id,phone,name)
+	SELECT whatsapp_id,phone,name FROM input ON CONFLICT DO NOTHING`, string(payload))
+	if err != nil {
+		return 0, err
+	}
+	_, err = tx.ExecContext(ctx, `WITH input AS (
+		SELECT * FROM jsonb_to_recordset($1::jsonb) AS x(whatsapp_id text,phone text,name text)
+	) UPDATE contacts SET name=CASE WHEN contacts.name='' THEN input.name ELSE contacts.name END,updated_at=now()
+	FROM input WHERE contacts.phone=input.phone`, string(payload))
+	if err != nil {
+		return 0, err
 	}
 	if err = tx.Commit(); err != nil {
 		return 0, err
 	}
-	return count, nil
+	return len(imports), nil
 }
 
 var phonePatternWorker = regexp.MustCompile(`^[1-9][0-9]{7,14}$`)
