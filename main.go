@@ -60,6 +60,10 @@ func handler(db *sql.DB, token string) http.Handler {
 		defer cancel()
 		r = r.WithContext(ctx)
 		fail := func() { respond(w, 503, map[string]string{"error": "database_unavailable_or_not_initialized"}) }
+		if r.URL.Path == "/v1/accounts" {
+			handleAccounts(w, r, db)
+			return
+		}
 		if strings.HasPrefix(r.URL.Path, "/v1/contacts") {
 			handleContacts(w, r, db)
 			return

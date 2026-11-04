@@ -55,6 +55,19 @@ func Open(ctx context.Context, migrate bool) (*sql.DB, error) {
 }
 
 const schema = `
+CREATE TABLE IF NOT EXISTS whatsapp_accounts (
+ id TEXT PRIMARY KEY,
+ name TEXT NOT NULL,
+ device_jid TEXT NOT NULL DEFAULT '',
+ status TEXT NOT NULL DEFAULT 'offline',
+ qr TEXT NOT NULL DEFAULT '',
+ qr_expires TIMESTAMPTZ,
+ heartbeat TIMESTAMPTZ NOT NULL DEFAULT now(),
+ enabled BOOLEAN NOT NULL DEFAULT true,
+ created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+ updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+INSERT INTO whatsapp_accounts(id,name) VALUES('primary','Principal') ON CONFLICT(id) DO NOTHING;
 CREATE TABLE IF NOT EXISTS state (
  id INTEGER PRIMARY KEY CHECK(id=1), status TEXT NOT NULL DEFAULT 'offline',
  qr TEXT NOT NULL DEFAULT '', qr_expires TIMESTAMPTZ,
@@ -65,6 +78,8 @@ CREATE TABLE IF NOT EXISTS commands (
  id TEXT PRIMARY KEY, kind TEXT NOT NULL, payload JSONB NOT NULL DEFAULT '{}',
  status TEXT NOT NULL DEFAULT 'pending', result JSONB, created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+ALTER TABLE commands ADD COLUMN IF NOT EXISTS account_id TEXT NOT NULL DEFAULT 'primary';
+CREATE INDEX IF NOT EXISTS commands_account_pending ON commands(account_id,created_at) WHERE status='pending';
 CREATE INDEX IF NOT EXISTS commands_pending ON commands(created_at) WHERE status='pending';
 CREATE TABLE IF NOT EXISTS messages (
  seq BIGSERIAL PRIMARY KEY, message_id TEXT NOT NULL, chat TEXT NOT NULL,
@@ -73,6 +88,8 @@ CREATE TABLE IF NOT EXISTS messages (
  UNIQUE(message_id,chat)
 );
 ALTER TABLE messages ADD COLUMN IF NOT EXISTS from_me BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS account_id TEXT NOT NULL DEFAULT 'primary';
+CREATE INDEX IF NOT EXISTS messages_account_chat ON messages(account_id,chat,seq DESC);
 CREATE TABLE IF NOT EXISTS message_media (
  id BIGSERIAL PRIMARY KEY,
  message_id TEXT NOT NULL,
@@ -88,6 +105,8 @@ CREATE TABLE IF NOT EXISTS message_media (
  UNIQUE(message_id,chat)
 );
 CREATE INDEX IF NOT EXISTS message_media_lookup ON message_media(message_id,chat);
+ALTER TABLE message_media ADD COLUMN IF NOT EXISTS account_id TEXT NOT NULL DEFAULT 'primary';
+CREATE INDEX IF NOT EXISTS message_media_account_lookup ON message_media(account_id,message_id,chat);
 CREATE TABLE IF NOT EXISTS groups (
  group_id TEXT PRIMARY KEY, name TEXT NOT NULL, topic TEXT NOT NULL DEFAULT '',
  participant_count INTEGER NOT NULL DEFAULT 0,
@@ -98,6 +117,8 @@ CREATE TABLE IF NOT EXISTS groups (
 );
 ALTER TABLE groups ADD COLUMN IF NOT EXISTS attendance_stage TEXT NOT NULL DEFAULT 'new';
 ALTER TABLE groups ADD COLUMN IF NOT EXISTS priority TEXT NOT NULL DEFAULT 'normal';
+ALTER TABLE groups ADD COLUMN IF NOT EXISTS account_id TEXT NOT NULL DEFAULT 'primary';
+CREATE INDEX IF NOT EXISTS groups_account_name ON groups(account_id,lower(name));
 CREATE TABLE IF NOT EXISTS contacts (
  id BIGSERIAL PRIMARY KEY,
  whatsapp_id TEXT NOT NULL UNIQUE,
@@ -122,6 +143,8 @@ CREATE TABLE IF NOT EXISTS contacts (
 ALTER TABLE contacts ADD COLUMN IF NOT EXISTS nickname TEXT NOT NULL DEFAULT '';
 ALTER TABLE contacts ADD COLUMN IF NOT EXISTS attendance_stage TEXT NOT NULL DEFAULT 'new';
 ALTER TABLE contacts ADD COLUMN IF NOT EXISTS priority TEXT NOT NULL DEFAULT 'normal';
+ALTER TABLE contacts ADD COLUMN IF NOT EXISTS account_id TEXT NOT NULL DEFAULT 'primary';
+CREATE INDEX IF NOT EXISTS contacts_account_name ON contacts(account_id,lower(name));
 CREATE TABLE IF NOT EXISTS attendance_stages (
  id TEXT PRIMARY KEY,
  name TEXT NOT NULL,
@@ -148,6 +171,8 @@ CREATE TABLE IF NOT EXISTS entity_comments (
  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS entity_comments_lookup ON entity_comments(entity_type,entity_id,created_at DESC);
+ALTER TABLE entity_comments ADD COLUMN IF NOT EXISTS account_id TEXT NOT NULL DEFAULT 'primary';
+CREATE INDEX IF NOT EXISTS entity_comments_account_lookup ON entity_comments(account_id,entity_type,entity_id,created_at DESC);
 INSERT INTO contacts(whatsapp_id,phone,first_contact_at,last_contact_at)
 SELECT chat,split_part(chat,'@',1),min(timestamp),max(timestamp)
 FROM messages WHERE chat LIKE '%@s.whatsapp.net'
@@ -155,6 +180,7 @@ GROUP BY chat
 ON CONFLICT(whatsapp_id) DO UPDATE SET
  last_contact_at=GREATEST(contacts.last_contact_at,excluded.last_contact_at),updated_at=now();
 ALTER TABLE state ENABLE ROW LEVEL SECURITY;
+ALTER TABLE whatsapp_accounts ENABLE ROW LEVEL SECURITY;
 ALTER TABLE commands ENABLE ROW LEVEL SECURITY;
 ALTER TABLE messages ENABLE ROW LEVEL SECURITY;
 ALTER TABLE message_media ENABLE ROW LEVEL SECURITY;

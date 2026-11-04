@@ -91,7 +91,7 @@ func main() {
 			case <-ticker.C:
 				check, done := context.WithTimeout(ctx, 4*time.Second)
 				// Use the lock connection itself: losing this session must stop the client.
-				_, err := lock.ExecContext(check, "UPDATE state SET heartbeat=now() WHERE id=1")
+				_, err := lock.ExecContext(check, "UPDATE state SET heartbeat=now() WHERE id=1; UPDATE whatsapp_accounts SET heartbeat=now() WHERE id='primary'")
 				done()
 				if err != nil {
 					log.Print("conexão de coordenação perdida; encerrando worker")
@@ -127,6 +127,14 @@ func (w *worker) state(status, qr string, ttl time.Duration) {
 	ctx, cancel := context.WithTimeout(w.ctx, 5*time.Second)
 	defer cancel()
 	_, err := w.db.ExecContext(ctx, "UPDATE state SET status=$1,qr=$2,qr_expires=$3,heartbeat=now() WHERE id=1", status, qr, time.Now().Add(ttl))
+	if err == nil {
+		deviceJID := ""
+		if w.client.Store.ID != nil {
+			deviceJID = w.client.Store.ID.String()
+		}
+		_, err = w.db.ExecContext(ctx, `UPDATE whatsapp_accounts SET status=$2,qr=$3,qr_expires=$4,heartbeat=now(),
+			device_jid=CASE WHEN $5<>'' THEN $5 ELSE device_jid END,updated_at=now() WHERE id=$1`, "primary", status, qr, time.Now().Add(ttl), deviceJID)
+	}
 	if err != nil {
 		log.Print("falha ao atualizar status")
 	}
