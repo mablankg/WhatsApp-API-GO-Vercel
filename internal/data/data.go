@@ -101,6 +101,14 @@ CREATE TABLE IF NOT EXISTS contacts (
 ALTER TABLE contacts ADD COLUMN IF NOT EXISTS nickname TEXT NOT NULL DEFAULT '';
 CREATE INDEX IF NOT EXISTS contacts_name_search ON contacts(lower(name));
 CREATE INDEX IF NOT EXISTS contacts_last_contact ON contacts(last_contact_at DESC);
+CREATE TABLE IF NOT EXISTS entity_comments (
+ id BIGSERIAL PRIMARY KEY,
+ entity_type TEXT NOT NULL CHECK(entity_type IN ('contact','group')),
+ entity_id TEXT NOT NULL,
+ body TEXT NOT NULL,
+ created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS entity_comments_lookup ON entity_comments(entity_type,entity_id,created_at DESC);
 INSERT INTO contacts(whatsapp_id,phone,first_contact_at,last_contact_at)
 SELECT chat,split_part(chat,'@',1),min(timestamp),max(timestamp)
 FROM messages WHERE chat LIKE '%@s.whatsapp.net'
@@ -112,6 +120,7 @@ ALTER TABLE commands ENABLE ROW LEVEL SECURITY;
 ALTER TABLE messages ENABLE ROW LEVEL SECURITY;
 ALTER TABLE groups ENABLE ROW LEVEL SECURITY;
 ALTER TABLE contacts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE entity_comments ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON SCHEMA wa_private FROM PUBLIC;
 `
 

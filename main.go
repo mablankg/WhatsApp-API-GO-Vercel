@@ -64,6 +64,10 @@ func handler(db *sql.DB, token string) http.Handler {
 			handleContacts(w, r, db)
 			return
 		}
+		if r.URL.Path == "/v1/comments" {
+			handleComments(w, r, db)
+			return
+		}
 		switch {
 		case r.Method == "GET" && r.URL.Path == "/v1/status":
 			var status string
@@ -186,6 +190,33 @@ func handler(db *sql.DB, token string) http.Handler {
 				return
 			}
 			respond(w, 202, map[string]string{"id": id, "status": "pending", "poll": "/v1/commands/" + id})
+		case r.Method == "GET" && isGroupMessagePath(r.URL.Path):
+			groupID := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/groups/"), "/messages")
+			if !groupPattern.MatchString(groupID) {
+				respond(w, 400, map[string]string{"error": "invalid_group_id"})
+				return
+			}
+			rows, err := db.QueryContext(ctx, `SELECT seq,message_id,text,timestamp,from_me FROM (
+				SELECT seq,message_id,text,timestamp,from_me FROM messages WHERE chat=$1 ORDER BY seq DESC LIMIT 200
+			) recent ORDER BY seq`, groupID)
+			if err != nil {
+				fail()
+				return
+			}
+			defer rows.Close()
+			items := []map[string]any{}
+			for rows.Next() {
+				var seq int64
+				var messageID, text string
+				var timestamp time.Time
+				var fromMe bool
+				if rows.Scan(&seq, &messageID, &text, &timestamp, &fromMe) != nil {
+					fail()
+					return
+				}
+				items = append(items, map[string]any{"seq": seq, "id": messageID, "text": text, "timestamp": timestamp, "from_me": fromMe})
+			}
+			respond(w, 200, map[string]any{"messages": items})
 		case r.Method == "POST" && (r.URL.Path == "/v1/connect" || r.URL.Path == "/v1/messages"):
 			kind := "connect"
 			payload := []byte(`{}`)

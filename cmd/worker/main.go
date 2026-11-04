@@ -285,6 +285,7 @@ func (w *worker) next() {
 			status = "unknown"
 		} else {
 			result["message_id"] = response.ID
+			_, _ = w.db.ExecContext(ctx, `INSERT INTO messages(message_id,chat,sender,text,timestamp,from_me) VALUES($1,$2,$3,$4,now(),true) ON CONFLICT DO NOTHING`, response.ID, groupJID.String(), "me", p.Text)
 		}
 	case "sync_groups":
 		if !w.client.IsLoggedIn() {
