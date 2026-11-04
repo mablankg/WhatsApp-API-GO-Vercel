@@ -109,7 +109,7 @@ func main() {
 	}
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
-	groupTicker := time.NewTicker(time.Minute)
+	groupTicker := time.NewTicker(30 * time.Minute)
 	defer groupTicker.Stop()
 	for {
 		select {
@@ -306,6 +306,7 @@ func (w *worker) next() {
 		}
 		count, err := w.refreshContacts()
 		if err != nil {
+			log.Printf("falha ao sincronizar contatos: %v", err)
 			result["error"] = "contact_sync_failed"
 			status = "failed"
 		} else {
@@ -370,6 +371,26 @@ func (w *worker) refreshContacts() (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	lidToPhone := map[string]string{}
+	rows, err := w.db.QueryContext(ctx, `SELECT lid,pn FROM whatsmeow_lid_map`)
+	if err != nil {
+		return 0, err
+	}
+	for rows.Next() {
+		var lid, phone string
+		if err = rows.Scan(&lid, &phone); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		lidToPhone[lid] = phone
+	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return 0, err
+	}
+	if err = rows.Close(); err != nil {
+		return 0, err
+	}
 	tx, err := w.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
@@ -379,10 +400,11 @@ func (w *worker) refreshContacts() (int, error) {
 	for jid, info := range items {
 		phoneJID := jid
 		if jid.Server == types.HiddenUserServer {
-			phoneJID, err = w.client.Store.LIDs.GetPNForLID(ctx, jid)
-			if err != nil {
+			phone, found := lidToPhone[jid.User]
+			if !found {
 				continue
 			}
+			phoneJID = types.NewJID(phone, types.DefaultUserServer)
 		}
 		if phoneJID.Server != types.DefaultUserServer || !phonePatternWorker.MatchString(phoneJID.User) {
 			continue
