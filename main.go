@@ -69,6 +69,15 @@ func handler(db *sql.DB, token string) http.Handler {
 			handleLawyers(w, r, db)
 			return
 		}
+		if r.Method == http.MethodPost && r.URL.Path == "/v1/directory/reset" {
+			id, err := enqueueRaw(ctx, db, requestAccount(r), "reset_directory", []byte(`{}`))
+			if err != nil {
+				respondQueueError(w, err, fail)
+				return
+			}
+			respond(w, http.StatusAccepted, map[string]string{"id": id, "status": "pending", "poll": "/v1/commands/" + id})
+			return
+		}
 		if strings.HasPrefix(r.URL.Path, "/v1/contacts") {
 			handleContacts(w, r, db)
 			return
