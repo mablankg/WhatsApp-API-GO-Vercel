@@ -71,8 +71,10 @@ func handleContacts(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 		}
 		rows, err := db.QueryContext(ctx, `SELECT seq,message_id,chat,sender,text,timestamp,from_me FROM (
 			SELECT seq,message_id,chat,sender,text,timestamp,from_me FROM messages
-			WHERE chat=$1 OR sender=$1 ORDER BY seq DESC LIMIT 200
-		) recent ORDER BY seq`, phone+"@s.whatsapp.net")
+			WHERE chat=$1 OR sender=$1 OR chat=(SELECT lid||'@lid' FROM whatsmeow_lid_map WHERE pn=$2)
+			OR sender=(SELECT lid||'@lid' FROM whatsmeow_lid_map WHERE pn=$2)
+			ORDER BY seq DESC LIMIT 200
+		) recent ORDER BY seq`, phone+"@s.whatsapp.net", phone)
 		if err != nil {
 			respond(w, 503, map[string]string{"error": "messages_unavailable"})
 			return
