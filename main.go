@@ -270,11 +270,23 @@ func handler(db *sql.DB, token string) http.Handler {
 			if after == "" {
 				after = "0"
 			}
+			if after == "latest" {
+				var latest int64
+				if db.QueryRowContext(ctx, "SELECT COALESCE(max(seq),0) FROM messages").Scan(&latest) != nil {
+					fail()
+					return
+				}
+				respond(w, 200, map[string]any{"messages": []any{}, "next_after": fmtCursor(latest)})
+				return
+			}
 			if !regexp.MustCompile(`^[0-9]{1,18}$`).MatchString(after) {
 				respond(w, 400, map[string]string{"error": "invalid_cursor"})
 				return
 			}
-			rows, err := db.QueryContext(ctx, "SELECT seq,message_id,chat,sender,text,timestamp FROM messages WHERE seq>$1 ORDER BY seq LIMIT 100", after)
+			rows, err := db.QueryContext(ctx, `SELECT m.seq,m.message_id,m.chat,m.sender,m.text,m.timestamp,m.from_me,
+				CASE WHEN m.chat LIKE '%@s.whatsapp.net' THEN split_part(m.chat,'@',1)
+				WHEN m.chat LIKE '%@lid' THEN COALESCE((SELECT pn FROM whatsmeow_lid_map WHERE lid=split_part(m.chat,'@',1)),'') ELSE '' END
+				FROM messages m WHERE m.seq>$1 ORDER BY m.seq LIMIT 100`, after)
 			if err != nil {
 				fail()
 				return
@@ -284,12 +296,14 @@ func handler(db *sql.DB, token string) http.Handler {
 			for rows.Next() {
 				var seq int64
 				var id, chat, sender, text string
+				var contactPhone string
 				var ts time.Time
-				if rows.Scan(&seq, &id, &chat, &sender, &text, &ts) != nil {
+				var fromMe bool
+				if rows.Scan(&seq, &id, &chat, &sender, &text, &ts, &fromMe, &contactPhone) != nil {
 					fail()
 					return
 				}
-				items = append(items, map[string]any{"seq": seq, "id": id, "chat": chat, "sender": sender, "text": text, "timestamp": ts})
+				items = append(items, map[string]any{"seq": seq, "id": id, "chat": chat, "sender": sender, "text": text, "timestamp": ts, "from_me": fromMe, "contact_phone": contactPhone})
 				after = fmtCursor(seq)
 			}
 			if rows.Err() != nil {
