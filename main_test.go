@@ -8,7 +8,7 @@ import (
 
 func TestAuthorizationProtectsEveryEndpoint(t *testing.T) {
 	token := strings.Repeat("a", 32)
-	for _, path := range []string{"/v1/status", "/v1/qr", "/v1/messages", "/v1/connect", "/v1/groups", "/v1/groups/sync", "/v1/contacts", "/v1/contacts/1", "/v1/commands/123"} {
+	for _, path := range []string{"/v1/status", "/v1/qr", "/v1/messages", "/v1/connect", "/v1/groups", "/v1/groups/sync", "/v1/contacts", "/v1/contacts/1", "/v1/media/1", "/v1/commands/123"} {
 		for _, auth := range []string{"", "Bearer wrong", "Bearer " + strings.Repeat("b", 32)} {
 			r := httptest.NewRequest("GET", path, nil)
 			r.Header.Set("Authorization", auth)

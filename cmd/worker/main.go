@@ -152,6 +152,7 @@ func (w *worker) event(event any) {
 		if err != nil {
 			log.Print("falha ao guardar mensagem recebida")
 		}
+		go w.storeMedia(e)
 		contactJID := e.Info.Chat
 		if contactJID.Server == types.HiddenUserServer {
 			if phoneJID, mapErr := w.client.Store.LIDs.GetPNForLID(ctx, contactJID); mapErr == nil && !phoneJID.IsEmpty() {
@@ -168,6 +169,62 @@ func (w *worker) event(event any) {
 				log.Print("falha ao atualizar contato")
 			}
 		}
+	}
+}
+
+const maxMediaBytes = 16 * 1024 * 1024
+
+func (w *worker) storeMedia(event *events.Message) {
+	var downloadable whatsmeow.DownloadableMessage
+	mediaType, mimeType, fileName, caption := "", "application/octet-stream", "", ""
+	var declaredLength uint64
+	var duration uint32
+	message := event.Message
+	switch {
+	case message.GetImageMessage() != nil:
+		item := message.GetImageMessage()
+		downloadable, mediaType, mimeType, caption, declaredLength = item, "image", item.GetMimetype(), item.GetCaption(), item.GetFileLength()
+	case message.GetAudioMessage() != nil:
+		item := message.GetAudioMessage()
+		downloadable, mediaType, mimeType, declaredLength, duration = item, "audio", item.GetMimetype(), item.GetFileLength(), item.GetSeconds()
+	case message.GetVideoMessage() != nil:
+		item := message.GetVideoMessage()
+		downloadable, mediaType, mimeType, caption, declaredLength, duration = item, "video", item.GetMimetype(), item.GetCaption(), item.GetFileLength(), item.GetSeconds()
+	case message.GetDocumentMessage() != nil:
+		item := message.GetDocumentMessage()
+		downloadable, mediaType, mimeType, fileName, caption, declaredLength = item, "document", item.GetMimetype(), item.GetFileName(), item.GetCaption(), item.GetFileLength()
+		if fileName == "" {
+			fileName = item.GetTitle()
+		}
+	case message.GetStickerMessage() != nil:
+		item := message.GetStickerMessage()
+		downloadable, mediaType, mimeType, declaredLength = item, "sticker", item.GetMimetype(), item.GetFileLength()
+	default:
+		return
+	}
+	if mimeType == "" {
+		mimeType = "application/octet-stream"
+	}
+	if declaredLength > maxMediaBytes {
+		log.Printf("anexo %s ignorado: excede 16 MB", event.Info.ID)
+		return
+	}
+	ctx, cancel := context.WithTimeout(w.ctx, 90*time.Second)
+	defer cancel()
+	content, err := w.client.Download(ctx, downloadable)
+	if err != nil {
+		log.Printf("falha ao baixar anexo %s: %v", event.Info.ID, err)
+		return
+	}
+	if len(content) > maxMediaBytes {
+		log.Printf("anexo %s ignorado após download: excede 16 MB", event.Info.ID)
+		return
+	}
+	_, err = w.db.ExecContext(ctx, `INSERT INTO message_media(message_id,chat,media_type,mime_type,file_name,caption,file_size,duration_seconds,data)
+		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(message_id,chat) DO NOTHING`,
+		event.Info.ID, event.Info.Chat.String(), mediaType, mimeType, fileName, caption, len(content), duration, content)
+	if err != nil {
+		log.Printf("falha ao guardar anexo %s: %v", event.Info.ID, err)
 	}
 }
 func (w *worker) connect() error {

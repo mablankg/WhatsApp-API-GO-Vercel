@@ -69,12 +69,14 @@ func handleContacts(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 			respond(w, 503, map[string]string{"error": "contacts_unavailable"})
 			return
 		}
-		rows, err := db.QueryContext(ctx, `SELECT seq,message_id,chat,sender,text,timestamp,from_me FROM (
+		rows, err := db.QueryContext(ctx, `SELECT recent.seq,recent.message_id,recent.chat,recent.sender,recent.text,recent.timestamp,recent.from_me,
+			COALESCE(mm.id,0),COALESCE(mm.media_type,''),COALESCE(mm.mime_type,''),COALESCE(mm.file_name,''),COALESCE(mm.caption,''),COALESCE(mm.file_size,0),COALESCE(mm.duration_seconds,0)
+		FROM (
 			SELECT seq,message_id,chat,sender,text,timestamp,from_me FROM messages
 			WHERE chat=$1 OR sender=$1 OR chat=(SELECT lid||'@lid' FROM whatsmeow_lid_map WHERE pn=$2)
 			OR sender=(SELECT lid||'@lid' FROM whatsmeow_lid_map WHERE pn=$2)
 			ORDER BY seq DESC LIMIT 200
-		) recent ORDER BY seq`, phone+"@s.whatsapp.net", phone)
+		) recent LEFT JOIN message_media mm ON mm.message_id=recent.message_id AND mm.chat=recent.chat ORDER BY recent.seq`, phone+"@s.whatsapp.net", phone)
 		if err != nil {
 			respond(w, 503, map[string]string{"error": "messages_unavailable"})
 			return
@@ -86,11 +88,14 @@ func handleContacts(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 			var messageID, chat, sender, text string
 			var timestamp time.Time
 			var fromMe bool
-			if err = rows.Scan(&seq, &messageID, &chat, &sender, &text, &timestamp, &fromMe); err != nil {
+			var mediaID, fileSize int64
+			var mediaType, mimeType, fileName, caption string
+			var duration int
+			if err = rows.Scan(&seq, &messageID, &chat, &sender, &text, &timestamp, &fromMe, &mediaID, &mediaType, &mimeType, &fileName, &caption, &fileSize, &duration); err != nil {
 				respond(w, 503, map[string]string{"error": "messages_unavailable"})
 				return
 			}
-			items = append(items, map[string]any{"seq": seq, "id": messageID, "text": text, "timestamp": timestamp, "from_me": fromMe})
+			items = append(items, map[string]any{"seq": seq, "id": messageID, "text": text, "timestamp": timestamp, "from_me": fromMe, "media": mediaJSON(mediaID, mediaType, mimeType, fileName, caption, fileSize, duration)})
 		}
 		respond(w, 200, map[string]any{"messages": items})
 		return
