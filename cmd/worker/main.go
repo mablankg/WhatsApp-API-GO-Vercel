@@ -479,25 +479,13 @@ func (w *worker) next() {
 			result["contact_count"] = strconv.Itoa(count)
 		}
 	case "reset_directory":
-		if !w.client.IsLoggedIn() {
-			result["error"] = "whatsapp_not_connected"
-			status = "failed"
-			break
-		}
 		if _, err := w.db.ExecContext(ctx, "DELETE FROM contacts WHERE account_id=$1; DELETE FROM groups WHERE account_id=$1", w.accountID); err != nil {
 			result["error"] = "directory_reset_failed"
 			status = "failed"
 			break
 		}
-		contacts, contactsErr := w.refreshContacts()
-		groups, groupsErr := w.refreshGroups()
-		if contactsErr != nil || groupsErr != nil {
-			result["error"] = "directory_sync_failed"
-			status = "failed"
-		} else {
-			result["contact_count"] = strconv.Itoa(contacts)
-			result["group_count"] = strconv.Itoa(groups)
-		}
+		result["contact_count"] = "0"
+		result["group_count"] = "0"
 	default:
 		result["error"] = "unsupported_command"
 		status = "failed"
