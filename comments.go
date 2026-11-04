@@ -18,7 +18,7 @@ func handleComments(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 		return
 	}
 	if r.Method == http.MethodGet {
-		rows, err := db.QueryContext(ctx, `SELECT id,body,created_at FROM entity_comments WHERE entity_type=$1 AND entity_id=$2 ORDER BY created_at DESC LIMIT 200`, entityType, entityID)
+		rows, err := db.QueryContext(ctx, `SELECT id,body,created_at FROM entity_comments WHERE account_id=$1 AND entity_type=$2 AND entity_id=$3 ORDER BY created_at DESC LIMIT 200`, requestAccount(r), entityType, entityID)
 		if err != nil {
 			respond(w, 503, map[string]string{"error": "comments_unavailable"})
 			return
@@ -55,7 +55,7 @@ func handleComments(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 		}
 		var id int64
 		var created time.Time
-		if err := db.QueryRowContext(ctx, `INSERT INTO entity_comments(entity_type,entity_id,body) VALUES($1,$2,$3) RETURNING id,created_at`, entityType, entityID, body.Body).Scan(&id, &created); err != nil {
+		if err := db.QueryRowContext(ctx, `INSERT INTO entity_comments(account_id,entity_type,entity_id,body) VALUES($1,$2,$3,$4) RETURNING id,created_at`, requestAccount(r), entityType, entityID, body.Body).Scan(&id, &created); err != nil {
 			respond(w, 503, map[string]string{"error": "comment_not_saved"})
 			return
 		}

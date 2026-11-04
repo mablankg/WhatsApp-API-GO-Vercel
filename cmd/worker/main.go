@@ -8,6 +8,7 @@ import (
 	"github.com/mablankg/WhatsApp-API-GO-Vercel/internal/data"
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
@@ -24,11 +25,21 @@ import (
 )
 
 type worker struct {
-	db      *sql.DB
-	client  *whatsmeow.Client
-	mu      sync.Mutex
-	pairing bool
-	ctx     context.Context
+	accountID string
+	db        *sql.DB
+	client    *whatsmeow.Client
+	mu        sync.Mutex
+	pairing   bool
+	ctx       context.Context
+}
+
+type manager struct {
+	db       *sql.DB
+	store    *sqlstore.Container
+	ctx      context.Context
+	mu       sync.Mutex
+	sessions map[string]*worker
+	devices  map[string]*store.Device
 }
 
 func main() {
@@ -66,21 +77,27 @@ func main() {
 		return
 	}
 	defer lock.ExecContext(context.Background(), "SELECT pg_advisory_unlock(728104562)")
-	store := sqlstore.NewWithDB(db, "postgres", nil)
-	if err = store.Upgrade(ctx); err != nil {
+	container := sqlstore.NewWithDB(db, "postgres", nil)
+	if err = container.Upgrade(ctx); err != nil {
 		log.Fatal("falha ao criar tabelas whatsmeow")
 	}
-	device, err := store.GetFirstDevice(ctx)
+	devices, err := container.GetAllDevices(ctx)
 	if err != nil {
-		log.Fatal("falha ao recuperar sessão")
+		log.Fatal("falha ao recuperar sessões")
 	}
-	w := &worker{db: db, ctx: ctx, client: whatsmeow.NewClient(device, nil)}
-	w.client.AddEventHandler(w.event)
+	m := &manager{db: db, store: container, ctx: ctx, sessions: map[string]*worker{}, devices: map[string]*store.Device{}}
+	for _, device := range devices {
+		if device.ID != nil {
+			m.devices[device.ID.String()] = device
+		}
+	}
 	if _, err = db.ExecContext(ctx, "UPDATE commands SET status='unknown',result='{"+`"error":"worker_restarted_check_delivery_before_retry"`+"}' WHERE status='running'"); err != nil {
 		log.Fatal("falha ao recuperar comandos")
 	}
-	w.state("disconnected", "", 0)
-	defer w.client.Disconnect()
+	if err = m.syncAccounts(); err != nil {
+		log.Fatal("falha ao carregar conexões")
+	}
+	defer m.disconnectAll()
 	go func() {
 		ticker := time.NewTicker(5 * time.Second)
 		defer ticker.Stop()
@@ -91,22 +108,17 @@ func main() {
 			case <-ticker.C:
 				check, done := context.WithTimeout(ctx, 4*time.Second)
 				// Use the lock connection itself: losing this session must stop the client.
-				_, err := lock.ExecContext(check, "UPDATE state SET heartbeat=now() WHERE id=1; UPDATE whatsapp_accounts SET heartbeat=now() WHERE id='primary'")
+				_, err := lock.ExecContext(check, "UPDATE state SET heartbeat=now() WHERE id=1; UPDATE whatsapp_accounts SET heartbeat=now() WHERE enabled=true")
 				done()
 				if err != nil {
 					log.Print("conexão de coordenação perdida; encerrando worker")
 					cancel()
-					w.client.Disconnect()
+					m.disconnectAll()
 					return
 				}
 			}
 		}
 	}()
-	if device.ID != nil {
-		if err = w.client.Connect(); err != nil {
-			log.Print("reconexão falhou; use POST /v1/connect")
-		}
-	}
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	groupTicker := time.NewTicker(30 * time.Minute)
@@ -116,24 +128,105 @@ func main() {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			w.next()
+			if err := m.syncAccounts(); err != nil {
+				log.Print("falha ao atualizar conexões")
+			}
+			m.next()
 		case <-groupTicker.C:
-			go w.refreshGroups()
+			m.refreshGroups()
 		}
+	}
+}
+
+func (m *manager) syncAccounts() error {
+	rows, err := m.db.QueryContext(m.ctx, `SELECT id,device_jid FROM whatsapp_accounts WHERE enabled=true ORDER BY created_at,id`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, deviceJID string
+		if err = rows.Scan(&id, &deviceJID); err != nil {
+			return err
+		}
+		m.mu.Lock()
+		_, exists := m.sessions[id]
+		m.mu.Unlock()
+		if exists {
+			continue
+		}
+		var device *store.Device
+		if deviceJID != "" {
+			device = m.devices[deviceJID]
+		}
+		if device == nil && id == "primary" {
+			for jid, candidate := range m.devices {
+				device, deviceJID = candidate, jid
+				break
+			}
+			if device != nil {
+				_, _ = m.db.ExecContext(m.ctx, "UPDATE whatsapp_accounts SET device_jid=$2 WHERE id=$1", id, deviceJID)
+			}
+		}
+		if device == nil {
+			device = m.store.NewDevice()
+		}
+		w := &worker{accountID: id, db: m.db, ctx: m.ctx, client: whatsmeow.NewClient(device, nil)}
+		w.client.AddEventHandler(w.event)
+		w.state("disconnected", "", 0)
+		m.mu.Lock()
+		m.sessions[id] = w
+		m.mu.Unlock()
+		if device.ID != nil {
+			go func() {
+				if err := w.client.Connect(); err != nil {
+					log.Printf("reconexão %s falhou", w.accountID)
+				}
+			}()
+		}
+	}
+	return rows.Err()
+}
+
+func (m *manager) workers() []*worker {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	items := make([]*worker, 0, len(m.sessions))
+	for _, w := range m.sessions {
+		items = append(items, w)
+	}
+	return items
+}
+func (m *manager) next() {
+	for _, w := range m.workers() {
+		w.next()
+	}
+}
+func (m *manager) refreshGroups() {
+	for _, w := range m.workers() {
+		go w.refreshGroups()
+	}
+}
+func (m *manager) disconnectAll() {
+	for _, w := range m.workers() {
+		w.client.Disconnect()
 	}
 }
 
 func (w *worker) state(status, qr string, ttl time.Duration) {
 	ctx, cancel := context.WithTimeout(w.ctx, 5*time.Second)
 	defer cancel()
-	_, err := w.db.ExecContext(ctx, "UPDATE state SET status=$1,qr=$2,qr_expires=$3,heartbeat=now() WHERE id=1", status, qr, time.Now().Add(ttl))
+	var err error
+	if w.accountID == "primary" {
+		_, err = w.db.ExecContext(ctx, "UPDATE state SET status=$1,qr=$2,qr_expires=$3,heartbeat=now() WHERE id=1", status, qr, time.Now().Add(ttl))
+	}
 	if err == nil {
 		deviceJID := ""
 		if w.client.Store.ID != nil {
 			deviceJID = w.client.Store.ID.String()
 		}
 		_, err = w.db.ExecContext(ctx, `UPDATE whatsapp_accounts SET status=$2,qr=$3,qr_expires=$4,heartbeat=now(),
-			device_jid=CASE WHEN $5<>'' THEN $5 ELSE device_jid END,updated_at=now() WHERE id=$1`, "primary", status, qr, time.Now().Add(ttl), deviceJID)
+			device_jid=CASE WHEN $5<>'' THEN $5 ELSE device_jid END,updated_at=now() WHERE id=$1`, w.accountID, status, qr, time.Now().Add(ttl), deviceJID)
 	}
 	if err != nil {
 		log.Print("falha ao atualizar status")
@@ -156,7 +249,7 @@ func (w *worker) event(event any) {
 		}
 		ctx, cancel := context.WithTimeout(w.ctx, 5*time.Second)
 		defer cancel()
-		_, err := w.db.ExecContext(ctx, "INSERT INTO messages(message_id,chat,sender,text,timestamp,from_me) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING", e.Info.ID, e.Info.Chat.String(), e.Info.Sender.String(), text, e.Info.Timestamp, e.Info.IsFromMe)
+		_, err := w.db.ExecContext(ctx, "INSERT INTO messages(account_id,message_id,chat,sender,text,timestamp,from_me) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING", w.accountID, e.Info.ID, e.Info.Chat.String(), e.Info.Sender.String(), text, e.Info.Timestamp, e.Info.IsFromMe)
 		if err != nil {
 			log.Print("falha ao guardar mensagem recebida")
 		}
@@ -168,11 +261,11 @@ func (w *worker) event(event any) {
 			}
 		}
 		if contactJID.Server == types.DefaultUserServer {
-			_, err = w.db.ExecContext(ctx, `INSERT INTO contacts(whatsapp_id,phone,name,first_contact_at,last_contact_at)
-				VALUES($1,$2,$3,$4,$4) ON CONFLICT(whatsapp_id) DO UPDATE SET
+			_, err = w.db.ExecContext(ctx, `INSERT INTO contacts(account_id,whatsapp_id,phone,name,first_contact_at,last_contact_at)
+				VALUES($1,$2,$3,$4,$5,$5) ON CONFLICT(account_id,whatsapp_id) DO UPDATE SET
 				name=CASE WHEN contacts.name='' THEN excluded.name ELSE contacts.name END,
 				last_contact_at=GREATEST(contacts.last_contact_at,excluded.last_contact_at),updated_at=now()`,
-				contactJID.String(), contactJID.User, e.Info.PushName, e.Info.Timestamp)
+				w.accountID, contactJID.String(), contactJID.User, e.Info.PushName, e.Info.Timestamp)
 			if err != nil {
 				log.Print("falha ao atualizar contato")
 			}
@@ -228,9 +321,9 @@ func (w *worker) storeMedia(event *events.Message) {
 		log.Printf("anexo %s ignorado após download: excede 16 MB", event.Info.ID)
 		return
 	}
-	_, err = w.db.ExecContext(ctx, `INSERT INTO message_media(message_id,chat,media_type,mime_type,file_name,caption,file_size,duration_seconds,data)
-		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(message_id,chat) DO NOTHING`,
-		event.Info.ID, event.Info.Chat.String(), mediaType, mimeType, fileName, caption, len(content), duration, content)
+	_, err = w.db.ExecContext(ctx, `INSERT INTO message_media(account_id,message_id,chat,media_type,mime_type,file_name,caption,file_size,duration_seconds,data)
+		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT(account_id,message_id,chat) DO NOTHING`,
+		w.accountID, event.Info.ID, event.Info.Chat.String(), mediaType, mimeType, fileName, caption, len(content), duration, content)
 	if err != nil {
 		log.Printf("falha ao guardar anexo %s: %v", event.Info.ID, err)
 	}
@@ -271,7 +364,7 @@ func (w *worker) next() {
 	defer cancel()
 	var id, kind string
 	var raw []byte
-	err := w.db.QueryRowContext(ctx, `UPDATE commands SET status='running' WHERE id=(SELECT id FROM commands WHERE status='pending' ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED) RETURNING id,kind,payload`).Scan(&id, &kind, &raw)
+	err := w.db.QueryRowContext(ctx, `UPDATE commands SET status='running' WHERE id=(SELECT id FROM commands WHERE status='pending' AND account_id=$1 ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED) RETURNING id,kind,payload`, w.accountID).Scan(&id, &kind, &raw)
 	if err == sql.ErrNoRows {
 		return
 	}
@@ -290,6 +383,9 @@ func (w *worker) next() {
 			result["error"] = "connection_failed"
 			status = "failed"
 		}
+	case "disconnect":
+		w.client.Disconnect()
+		w.state("disconnected", "", 0)
 	case "send":
 		var p struct {
 			To   string
@@ -306,7 +402,7 @@ func (w *worker) next() {
 			status = "unknown"
 		} else {
 			result["message_id"] = response.ID
-			_, _ = w.db.ExecContext(ctx, `INSERT INTO messages(message_id,chat,sender,text,timestamp,from_me) VALUES($1,$2,$3,$4,now(),true) ON CONFLICT DO NOTHING`, response.ID, types.NewJID(p.To, types.DefaultUserServer).String(), "me", p.Text)
+			_, _ = w.db.ExecContext(ctx, `INSERT INTO messages(account_id,message_id,chat,sender,text,timestamp,from_me) VALUES($1,$2,$3,$4,$5,now(),true) ON CONFLICT DO NOTHING`, w.accountID, response.ID, types.NewJID(p.To, types.DefaultUserServer).String(), "me", p.Text)
 		}
 	case "create_group":
 		var p struct {
@@ -353,7 +449,7 @@ func (w *worker) next() {
 			status = "unknown"
 		} else {
 			result["message_id"] = response.ID
-			_, _ = w.db.ExecContext(ctx, `INSERT INTO messages(message_id,chat,sender,text,timestamp,from_me) VALUES($1,$2,$3,$4,now(),true) ON CONFLICT DO NOTHING`, response.ID, groupJID.String(), "me", p.Text)
+			_, _ = w.db.ExecContext(ctx, `INSERT INTO messages(account_id,message_id,chat,sender,text,timestamp,from_me) VALUES($1,$2,$3,$4,$5,now(),true) ON CONFLICT DO NOTHING`, w.accountID, response.ID, groupJID.String(), "me", p.Text)
 		}
 	case "sync_groups":
 		if !w.client.IsLoggedIn() {
@@ -411,8 +507,8 @@ func (w *worker) refreshGroups() (int, error) {
 	}
 	defer tx.Rollback()
 	for _, group := range groups {
-		if _, err = tx.ExecContext(ctx, `INSERT INTO groups(group_id,name,topic,participant_count,is_announce,updated_at) VALUES($1,$2,$3,$4,$5,now())
-			ON CONFLICT(group_id) DO UPDATE SET name=excluded.name,topic=excluded.topic,participant_count=excluded.participant_count,is_announce=excluded.is_announce,updated_at=now()`, group.JID.String(), group.Name, group.Topic, len(group.Participants), group.IsAnnounce); err != nil {
+		if _, err = tx.ExecContext(ctx, `INSERT INTO groups(account_id,group_id,name,topic,participant_count,is_announce,updated_at) VALUES($1,$2,$3,$4,$5,$6,now())
+			ON CONFLICT(account_id,group_id) DO UPDATE SET name=excluded.name,topic=excluded.topic,participant_count=excluded.participant_count,is_announce=excluded.is_announce,updated_at=now()`, w.accountID, group.JID.String(), group.Name, group.Topic, len(group.Participants), group.IsAnnounce); err != nil {
 			return 0, err
 		}
 	}
@@ -426,7 +522,7 @@ func (w *worker) refreshGroups() (int, error) {
 func (w *worker) upsertGroup(group *types.GroupInfo) {
 	ctx, cancel := context.WithTimeout(w.ctx, 5*time.Second)
 	defer cancel()
-	_, err := w.db.ExecContext(ctx, `INSERT INTO groups(group_id,name,topic,participant_count,is_announce,updated_at) VALUES($1,$2,$3,$4,$5,now()) ON CONFLICT(group_id) DO UPDATE SET name=excluded.name,topic=excluded.topic,participant_count=excluded.participant_count,is_announce=excluded.is_announce,updated_at=now()`, group.JID.String(), group.Name, group.Topic, len(group.Participants), group.IsAnnounce)
+	_, err := w.db.ExecContext(ctx, `INSERT INTO groups(account_id,group_id,name,topic,participant_count,is_announce,updated_at) VALUES($1,$2,$3,$4,$5,$6,now()) ON CONFLICT(account_id,group_id) DO UPDATE SET name=excluded.name,topic=excluded.topic,participant_count=excluded.participant_count,is_announce=excluded.is_announce,updated_at=now()`, w.accountID, group.JID.String(), group.Name, group.Topic, len(group.Participants), group.IsAnnounce)
 	if err != nil {
 		log.Printf("falha ao salvar grupo criado: %v", err)
 	}
@@ -499,15 +595,15 @@ func (w *worker) refreshContacts() (int, error) {
 	defer tx.Rollback()
 	_, err = tx.ExecContext(ctx, `WITH input AS (
 		SELECT * FROM jsonb_to_recordset($1::jsonb) AS x(whatsapp_id text,phone text,name text)
-	) INSERT INTO contacts(whatsapp_id,phone,name)
-	SELECT whatsapp_id,phone,name FROM input ON CONFLICT DO NOTHING`, string(payload))
+	) INSERT INTO contacts(account_id,whatsapp_id,phone,name)
+	SELECT $2,whatsapp_id,phone,name FROM input ON CONFLICT DO NOTHING`, string(payload), w.accountID)
 	if err != nil {
 		return 0, err
 	}
 	_, err = tx.ExecContext(ctx, `WITH input AS (
 		SELECT * FROM jsonb_to_recordset($1::jsonb) AS x(whatsapp_id text,phone text,name text)
 	) UPDATE contacts SET name=CASE WHEN contacts.name='' THEN input.name ELSE contacts.name END,updated_at=now()
-	FROM input WHERE contacts.phone=input.phone`, string(payload))
+	FROM input WHERE contacts.account_id=$2 AND contacts.phone=input.phone`, string(payload), w.accountID)
 	if err != nil {
 		return 0, err
 	}

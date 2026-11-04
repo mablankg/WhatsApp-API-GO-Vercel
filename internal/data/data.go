@@ -89,6 +89,8 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 ALTER TABLE messages ADD COLUMN IF NOT EXISTS from_me BOOLEAN NOT NULL DEFAULT false;
 ALTER TABLE messages ADD COLUMN IF NOT EXISTS account_id TEXT NOT NULL DEFAULT 'primary';
+ALTER TABLE messages DROP CONSTRAINT IF EXISTS messages_message_id_chat_key;
+CREATE UNIQUE INDEX IF NOT EXISTS messages_account_message_chat_key ON messages(account_id,message_id,chat);
 CREATE INDEX IF NOT EXISTS messages_account_chat ON messages(account_id,chat,seq DESC);
 CREATE TABLE IF NOT EXISTS message_media (
  id BIGSERIAL PRIMARY KEY,
@@ -106,6 +108,8 @@ CREATE TABLE IF NOT EXISTS message_media (
 );
 CREATE INDEX IF NOT EXISTS message_media_lookup ON message_media(message_id,chat);
 ALTER TABLE message_media ADD COLUMN IF NOT EXISTS account_id TEXT NOT NULL DEFAULT 'primary';
+ALTER TABLE message_media DROP CONSTRAINT IF EXISTS message_media_message_id_chat_key;
+CREATE UNIQUE INDEX IF NOT EXISTS message_media_account_message_chat_key ON message_media(account_id,message_id,chat);
 CREATE INDEX IF NOT EXISTS message_media_account_lookup ON message_media(account_id,message_id,chat);
 CREATE TABLE IF NOT EXISTS groups (
  group_id TEXT PRIMARY KEY, name TEXT NOT NULL, topic TEXT NOT NULL DEFAULT '',
@@ -118,6 +122,8 @@ CREATE TABLE IF NOT EXISTS groups (
 ALTER TABLE groups ADD COLUMN IF NOT EXISTS attendance_stage TEXT NOT NULL DEFAULT 'new';
 ALTER TABLE groups ADD COLUMN IF NOT EXISTS priority TEXT NOT NULL DEFAULT 'normal';
 ALTER TABLE groups ADD COLUMN IF NOT EXISTS account_id TEXT NOT NULL DEFAULT 'primary';
+ALTER TABLE groups DROP CONSTRAINT IF EXISTS groups_pkey;
+CREATE UNIQUE INDEX IF NOT EXISTS groups_account_group_key ON groups(account_id,group_id);
 CREATE INDEX IF NOT EXISTS groups_account_name ON groups(account_id,lower(name));
 CREATE TABLE IF NOT EXISTS contacts (
  id BIGSERIAL PRIMARY KEY,
@@ -144,6 +150,10 @@ ALTER TABLE contacts ADD COLUMN IF NOT EXISTS nickname TEXT NOT NULL DEFAULT '';
 ALTER TABLE contacts ADD COLUMN IF NOT EXISTS attendance_stage TEXT NOT NULL DEFAULT 'new';
 ALTER TABLE contacts ADD COLUMN IF NOT EXISTS priority TEXT NOT NULL DEFAULT 'normal';
 ALTER TABLE contacts ADD COLUMN IF NOT EXISTS account_id TEXT NOT NULL DEFAULT 'primary';
+ALTER TABLE contacts DROP CONSTRAINT IF EXISTS contacts_whatsapp_id_key;
+ALTER TABLE contacts DROP CONSTRAINT IF EXISTS contacts_phone_key;
+CREATE UNIQUE INDEX IF NOT EXISTS contacts_account_whatsapp_key ON contacts(account_id,whatsapp_id);
+CREATE UNIQUE INDEX IF NOT EXISTS contacts_account_phone_key ON contacts(account_id,phone);
 CREATE INDEX IF NOT EXISTS contacts_account_name ON contacts(account_id,lower(name));
 CREATE TABLE IF NOT EXISTS attendance_stages (
  id TEXT PRIMARY KEY,
@@ -173,11 +183,11 @@ CREATE TABLE IF NOT EXISTS entity_comments (
 CREATE INDEX IF NOT EXISTS entity_comments_lookup ON entity_comments(entity_type,entity_id,created_at DESC);
 ALTER TABLE entity_comments ADD COLUMN IF NOT EXISTS account_id TEXT NOT NULL DEFAULT 'primary';
 CREATE INDEX IF NOT EXISTS entity_comments_account_lookup ON entity_comments(account_id,entity_type,entity_id,created_at DESC);
-INSERT INTO contacts(whatsapp_id,phone,first_contact_at,last_contact_at)
-SELECT chat,split_part(chat,'@',1),min(timestamp),max(timestamp)
+INSERT INTO contacts(account_id,whatsapp_id,phone,first_contact_at,last_contact_at)
+SELECT account_id,chat,split_part(chat,'@',1),min(timestamp),max(timestamp)
 FROM messages WHERE chat LIKE '%@s.whatsapp.net'
-GROUP BY chat
-ON CONFLICT(whatsapp_id) DO UPDATE SET
+GROUP BY account_id,chat
+ON CONFLICT(account_id,whatsapp_id) DO UPDATE SET
  last_contact_at=GREATEST(contacts.last_contact_at,excluded.last_contact_at),updated_at=now();
 ALTER TABLE state ENABLE ROW LEVEL SECURITY;
 ALTER TABLE whatsapp_accounts ENABLE ROW LEVEL SECURITY;

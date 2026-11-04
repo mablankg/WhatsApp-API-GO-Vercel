@@ -27,6 +27,25 @@ func requestAccount(r *http.Request) string {
 
 func handleAccounts(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 	ctx := r.Context()
+	if strings.HasPrefix(r.URL.Path, "/v1/accounts/") {
+		parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/v1/accounts/"), "/")
+		if len(parts) != 2 || !accountIDPattern.MatchString(parts[0]) || (parts[1] != "connect" && parts[1] != "disconnect") || r.Method != http.MethodPost {
+			respond(w, 404, map[string]string{"error": "not_found"})
+			return
+		}
+		var exists bool
+		if err := db.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM whatsapp_accounts WHERE id=$1 AND enabled=true)", parts[0]).Scan(&exists); err != nil || !exists {
+			respond(w, 404, map[string]string{"error": "account_not_found"})
+			return
+		}
+		id, err := enqueueRaw(ctx, db, parts[0], parts[1], []byte(`{}`))
+		if err != nil {
+			respondQueueError(w, err, func() { respond(w, 503, map[string]string{"error": "account_command_failed"}) })
+			return
+		}
+		respond(w, 202, map[string]string{"id": id, "status": "pending", "poll": "/v1/commands/" + id})
+		return
+	}
 	if r.Method == http.MethodGet && r.URL.Path == "/v1/accounts" {
 		rows, err := db.QueryContext(ctx, `SELECT id,name,device_jid,status,heartbeat,enabled,created_at FROM whatsapp_accounts ORDER BY created_at,id`)
 		if err != nil {

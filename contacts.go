@@ -160,7 +160,7 @@ func handleContacts(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 			return
 		}
 		var phone string
-		if err := db.QueryRowContext(ctx, "SELECT phone FROM contacts WHERE id=$1", match[1]).Scan(&phone); err == sql.ErrNoRows {
+		if err := db.QueryRowContext(ctx, "SELECT phone FROM contacts WHERE id=$1 AND account_id=$2", match[1], requestAccount(r)).Scan(&phone); err == sql.ErrNoRows {
 			respond(w, 404, map[string]string{"error": "not_found"})
 			return
 		} else if err != nil {
@@ -171,10 +171,11 @@ func handleContacts(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 			COALESCE(mm.id,0),COALESCE(mm.media_type,''),COALESCE(mm.mime_type,''),COALESCE(mm.file_name,''),COALESCE(mm.caption,''),COALESCE(mm.file_size,0),COALESCE(mm.duration_seconds,0)
 		FROM (
 			SELECT seq,message_id,chat,sender,text,timestamp,from_me FROM messages
-			WHERE chat=$1 OR sender=$1 OR chat=(SELECT lid||'@lid' FROM whatsmeow_lid_map WHERE pn=$2)
-			OR sender=(SELECT lid||'@lid' FROM whatsmeow_lid_map WHERE pn=$2)
+			WHERE account_id=$1 AND (chat=$2 OR sender=$2 OR chat=(SELECT lid||'@lid' FROM whatsmeow_lid_map WHERE pn=$3)
+			OR sender=(SELECT lid||'@lid' FROM whatsmeow_lid_map WHERE pn=$3)
+			)
 			ORDER BY seq DESC LIMIT 200
-		) recent LEFT JOIN message_media mm ON mm.message_id=recent.message_id AND mm.chat=recent.chat ORDER BY recent.seq`, phone+"@s.whatsapp.net", phone)
+		) recent LEFT JOIN message_media mm ON mm.account_id=$1 AND mm.message_id=recent.message_id AND mm.chat=recent.chat ORDER BY recent.seq`, requestAccount(r), phone+"@s.whatsapp.net", phone)
 		if err != nil {
 			respond(w, 503, map[string]string{"error": "messages_unavailable"})
 			return
@@ -199,7 +200,7 @@ func handleContacts(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 		return
 	}
 	if r.URL.Path == "/v1/contacts/sync" && r.Method == http.MethodPost {
-		id, err := enqueueRaw(ctx, db, "sync_contacts", []byte(`{}`))
+		id, err := enqueueRaw(ctx, db, requestAccount(r), "sync_contacts", []byte(`{}`))
 		if err != nil {
 			respondQueueError(w, err, func() { respond(w, 503, map[string]string{"error": "contacts_unavailable"}) })
 			return
@@ -211,8 +212,8 @@ func handleContacts(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 		q := strings.TrimSpace(r.URL.Query().Get("q"))
 		archived := r.URL.Query().Get("archived") == "true"
 		rows, err := db.QueryContext(ctx, `SELECT `+contactColumns+` FROM contacts
-			WHERE archived=$1 AND ($2='' OR name ILIKE '%'||$2||'%' OR nickname ILIKE '%'||$2||'%' OR phone LIKE '%'||$2||'%' OR email ILIKE '%'||$2||'%')
-			ORDER BY last_contact_at DESC,id DESC LIMIT 200`, archived, q)
+			WHERE account_id=$1 AND archived=$2 AND ($3='' OR name ILIKE '%'||$3||'%' OR nickname ILIKE '%'||$3||'%' OR phone LIKE '%'||$3||'%' OR email ILIKE '%'||$3||'%')
+			ORDER BY last_contact_at DESC,id DESC LIMIT 200`, requestAccount(r), archived, q)
 		if err != nil {
 			respond(w, 503, map[string]string{"error": "contacts_unavailable"})
 			return
@@ -247,9 +248,9 @@ func handleContacts(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 			respond(w, 400, map[string]string{"error": "invalid_contact"})
 			return
 		}
-		item, err := scanContact(db.QueryRowContext(ctx, `INSERT INTO contacts(whatsapp_id,phone,name) VALUES($1,$2,$3)
-			ON CONFLICT(phone) DO UPDATE SET name=CASE WHEN excluded.name<>'' THEN excluded.name ELSE contacts.name END,updated_at=now()
-			RETURNING `+contactColumns, body.Phone+"@s.whatsapp.net", body.Phone, body.Name))
+		item, err := scanContact(db.QueryRowContext(ctx, `INSERT INTO contacts(account_id,whatsapp_id,phone,name) VALUES($1,$2,$3,$4)
+			ON CONFLICT(account_id,phone) DO UPDATE SET name=CASE WHEN excluded.name<>'' THEN excluded.name ELSE contacts.name END,updated_at=now()
+			RETURNING `+contactColumns, requestAccount(r), body.Phone+"@s.whatsapp.net", body.Phone, body.Name))
 		if err != nil {
 			respond(w, 503, map[string]string{"error": "contact_not_saved"})
 			return
@@ -263,7 +264,7 @@ func handleContacts(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 		return
 	}
 	if r.Method == http.MethodGet {
-		item, err := scanContact(db.QueryRowContext(ctx, "SELECT "+contactColumns+" FROM contacts WHERE id=$1", id))
+		item, err := scanContact(db.QueryRowContext(ctx, "SELECT "+contactColumns+" FROM contacts WHERE id=$1 AND account_id=$2", id, requestAccount(r)))
 		if err == sql.ErrNoRows {
 			respond(w, 404, map[string]string{"error": "not_found"})
 			return
@@ -276,7 +277,7 @@ func handleContacts(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 		return
 	}
 	if r.Method == http.MethodPatch {
-		item, err := scanContact(db.QueryRowContext(ctx, "SELECT "+contactColumns+" FROM contacts WHERE id=$1", id))
+		item, err := scanContact(db.QueryRowContext(ctx, "SELECT "+contactColumns+" FROM contacts WHERE id=$1 AND account_id=$2", id, requestAccount(r)))
 		if err == sql.ErrNoRows {
 			respond(w, 404, map[string]string{"error": "not_found"})
 			return
@@ -355,7 +356,7 @@ func handleContacts(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 			return
 		}
 		extra, _ := json.Marshal(item.Extra)
-		item, err = scanContact(db.QueryRowContext(ctx, `UPDATE contacts SET name=$2,nickname=$3,email=$4,tax_id=$5,contact_type=$6,status=$7,attendance_stage=$8,priority=$9,responsible=$10,tags=$11,notes=$12,extra=$13,archived=$14,updated_at=now() WHERE id=$1 RETURNING `+contactColumns, id, item.Name, item.Nickname, item.Email, item.TaxID, item.ContactType, item.Status, item.AttendanceStage, item.Priority, item.Responsible, pq.Array(item.Tags), item.Notes, string(extra), item.Archived))
+		item, err = scanContact(db.QueryRowContext(ctx, `UPDATE contacts SET name=$3,nickname=$4,email=$5,tax_id=$6,contact_type=$7,status=$8,attendance_stage=$9,priority=$10,responsible=$11,tags=$12,notes=$13,extra=$14,archived=$15,updated_at=now() WHERE id=$1 AND account_id=$2 RETURNING `+contactColumns, id, requestAccount(r), item.Name, item.Nickname, item.Email, item.TaxID, item.ContactType, item.Status, item.AttendanceStage, item.Priority, item.Responsible, pq.Array(item.Tags), item.Notes, string(extra), item.Archived))
 		if err != nil {
 			respond(w, 503, map[string]string{"error": "contact_not_saved"})
 			return

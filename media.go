@@ -40,7 +40,7 @@ func handleMedia(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 	}
 	var mimeType, fileName, mediaType string
 	var content []byte
-	err := db.QueryRowContext(r.Context(), "SELECT mime_type,file_name,media_type,data FROM message_media WHERE id=$1", match[1]).Scan(&mimeType, &fileName, &mediaType, &content)
+	err := db.QueryRowContext(r.Context(), "SELECT mime_type,file_name,media_type,data FROM message_media WHERE id=$1 AND account_id=$2", match[1], requestAccount(r)).Scan(&mimeType, &fileName, &mediaType, &content)
 	if err == sql.ErrNoRows {
 		respond(w, 404, map[string]string{"error": "not_found"})
 		return
