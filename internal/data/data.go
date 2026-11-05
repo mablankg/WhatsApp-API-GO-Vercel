@@ -68,6 +68,27 @@ CREATE TABLE IF NOT EXISTS whatsapp_accounts (
  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 INSERT INTO whatsapp_accounts(id,name) VALUES('primary','Principal') ON CONFLICT(id) DO NOTHING;
+CREATE TABLE IF NOT EXISTS app_accounts (
+ id TEXT PRIMARY KEY,
+ name TEXT NOT NULL,
+ created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+ enabled BOOLEAN NOT NULL DEFAULT true
+);
+CREATE TABLE IF NOT EXISTS app_users (
+ id BIGSERIAL PRIMARY KEY,
+ account_id TEXT NOT NULL REFERENCES app_accounts(id) ON DELETE CASCADE,
+ username TEXT NOT NULL,
+ email TEXT NOT NULL,
+ password_hash TEXT NOT NULL,
+ role TEXT NOT NULL DEFAULT 'user' CHECK(role IN ('master','admin','user')),
+ enabled BOOLEAN NOT NULL DEFAULT true,
+ must_change_password BOOLEAN NOT NULL DEFAULT true,
+ created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+ updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+ UNIQUE(account_id, username),
+ UNIQUE(account_id, email)
+);
+INSERT INTO app_accounts(id,name) VALUES('bbadvocacia','BBAdvocacia') ON CONFLICT(id) DO NOTHING;
 CREATE TABLE IF NOT EXISTS state (
  id INTEGER PRIMARY KEY CHECK(id=1), status TEXT NOT NULL DEFAULT 'offline',
  qr TEXT NOT NULL DEFAULT '', qr_expires TIMESTAMPTZ,
