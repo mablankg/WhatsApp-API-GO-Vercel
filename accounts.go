@@ -29,6 +29,31 @@ func handleAccounts(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 	ctx := r.Context()
 	if strings.HasPrefix(r.URL.Path, "/v1/accounts/") {
 		parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/v1/accounts/"), "/")
+		if len(parts) == 1 && accountIDPattern.MatchString(parts[0]) && r.Method == http.MethodPatch {
+			var body struct {
+				Name string `json:"name"`
+			}
+			if json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&body) != nil {
+				respond(w, 400, map[string]string{"error": "invalid_account"})
+				return
+			}
+			body.Name = strings.TrimSpace(body.Name)
+			if len([]rune(body.Name)) < 2 || len([]rune(body.Name)) > 60 {
+				respond(w, 400, map[string]string{"error": "invalid_account_name"})
+				return
+			}
+			result, err := db.ExecContext(ctx, "UPDATE whatsapp_accounts SET name=$2,updated_at=now() WHERE id=$1 AND enabled=true", parts[0], body.Name)
+			if err != nil {
+				respond(w, 503, map[string]string{"error": "account_update_failed"})
+				return
+			}
+			if n, _ := result.RowsAffected(); n == 0 {
+				respond(w, 404, map[string]string{"error": "account_not_found"})
+				return
+			}
+			respond(w, 200, map[string]any{"id": parts[0], "name": body.Name})
+			return
+		}
 		if len(parts) != 2 || !accountIDPattern.MatchString(parts[0]) || (parts[1] != "connect" && parts[1] != "disconnect") || r.Method != http.MethodPost {
 			respond(w, 404, map[string]string{"error": "not_found"})
 			return
