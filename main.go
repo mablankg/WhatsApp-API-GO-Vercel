@@ -241,18 +241,26 @@ func handler(db *sql.DB, token string) http.Handler {
 				return
 			}
 			var body struct {
-				Text string `json:"text"`
+				Text  string `json:"text"`
+				Media struct {
+					Type     string `json:"type"`
+					MimeType string `json:"mime_type"`
+					FileName string `json:"file_name"`
+					Caption  string `json:"caption"`
+					Data     string `json:"data"`
+				} `json:"media"`
 			}
-			dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16384))
+			dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 35<<20))
 			dec.DisallowUnknownFields()
-			if dec.Decode(&body) != nil || dec.Decode(new(any)) != io.EOF || strings.TrimSpace(body.Text) == "" || len(body.Text) > 8000 {
+			if dec.Decode(&body) != nil || dec.Decode(new(any)) != io.EOF || (strings.TrimSpace(body.Text) == "" && body.Media.Data == "") || len(body.Text) > 8000 || len(body.Media.Data) > 34<<20 {
 				respond(w, 400, map[string]string{"error": "text deve ter entre 1 e 8000 bytes"})
 				return
 			}
 			payload := struct {
 				GroupID string `json:"group_id"`
 				Text    string `json:"text"`
-			}{GroupID: groupID, Text: body.Text}
+				Media   any    `json:"media,omitempty"`
+			}{GroupID: groupID, Text: body.Text, Media: body.Media}
 			id, err := enqueueAccount(ctx, db, requestAccount(r), "send_group", payload)
 			if err != nil {
 				respondQueueError(w, err, fail)
@@ -299,12 +307,19 @@ func handler(db *sql.DB, token string) http.Handler {
 			if r.URL.Path == "/v1/messages" {
 				kind = "send"
 				var body struct {
-					To   string `json:"to"`
-					Text string `json:"text"`
+					To    string `json:"to"`
+					Text  string `json:"text"`
+					Media struct {
+						Type     string `json:"type"`
+						MimeType string `json:"mime_type"`
+						FileName string `json:"file_name"`
+						Caption  string `json:"caption"`
+						Data     string `json:"data"`
+					} `json:"media"`
 				}
-				dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16384))
+				dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 35<<20))
 				dec.DisallowUnknownFields()
-				if dec.Decode(&body) != nil || dec.Decode(new(any)) != io.EOF || !phonePattern.MatchString(body.To) || strings.TrimSpace(body.Text) == "" || len(body.Text) > 8000 {
+				if dec.Decode(&body) != nil || dec.Decode(new(any)) != io.EOF || !phonePattern.MatchString(body.To) || (strings.TrimSpace(body.Text) == "" && body.Media.Data == "") || len(body.Text) > 8000 || len(body.Media.Data) > 34<<20 {
 					respond(w, 400, map[string]string{"error": "use to com DDI, apenas dígitos, e text entre 1 e 8000 bytes"})
 					return
 				}

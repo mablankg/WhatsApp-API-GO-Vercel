@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"github.com/mablankg/WhatsApp-API-GO-Vercel/internal/data"
@@ -31,6 +32,61 @@ type worker struct {
 	mu        sync.Mutex
 	pairing   bool
 	ctx       context.Context
+}
+
+type outboundMedia struct {
+	Type     string `json:"type"`
+	MimeType string `json:"mime_type"`
+	FileName string `json:"file_name"`
+	Caption  string `json:"caption"`
+	Data     string `json:"data"`
+}
+
+func (w *worker) sendMessage(ctx context.Context, to types.JID, text string, media outboundMedia) (types.MessageID, error) {
+	if media.Data == "" {
+		response, err := w.client.SendMessage(ctx, to, &waE2E.Message{Conversation: proto.String(text)})
+		return response.ID, err
+	}
+	raw, err := base64.StdEncoding.DecodeString(media.Data)
+	if err != nil {
+		return "", err
+	}
+	if len(raw) > 25*1024*1024 {
+		return "", errors.New("media_too_large")
+	}
+	appInfo := whatsmeow.MediaDocument
+	switch media.Type {
+	case "image":
+		appInfo = whatsmeow.MediaImage
+	case "audio":
+		appInfo = whatsmeow.MediaAudio
+	case "video":
+		appInfo = whatsmeow.MediaVideo
+	}
+	upload, err := w.client.Upload(ctx, raw, appInfo)
+	if err != nil {
+		return "", err
+	}
+	mime := media.MimeType
+	if mime == "" {
+		mime = "application/octet-stream"
+	}
+	caption := media.Caption
+	if caption == "" {
+		caption = text
+	}
+	var msg *waE2E.Message
+	if media.Type == "image" {
+		msg = &waE2E.Message{ImageMessage: &waE2E.ImageMessage{URL: &upload.URL, DirectPath: &upload.DirectPath, MediaKey: upload.MediaKey, FileEncSHA256: upload.FileEncSHA256, FileSHA256: upload.FileSHA256, FileLength: &upload.FileLength, Mimetype: proto.String(mime), Caption: proto.String(caption)}}
+	} else if media.Type == "audio" {
+		msg = &waE2E.Message{AudioMessage: &waE2E.AudioMessage{URL: &upload.URL, DirectPath: &upload.DirectPath, MediaKey: upload.MediaKey, FileEncSHA256: upload.FileEncSHA256, FileSHA256: upload.FileSHA256, FileLength: &upload.FileLength, Mimetype: proto.String(mime), PTT: proto.Bool(false), StreamingSidecar: upload.StreamingSidecar}}
+	} else if media.Type == "video" {
+		msg = &waE2E.Message{VideoMessage: &waE2E.VideoMessage{URL: &upload.URL, DirectPath: &upload.DirectPath, MediaKey: upload.MediaKey, FileEncSHA256: upload.FileEncSHA256, FileSHA256: upload.FileSHA256, FileLength: &upload.FileLength, Mimetype: proto.String(mime), Caption: proto.String(caption)}}
+	} else {
+		msg = &waE2E.Message{DocumentMessage: &waE2E.DocumentMessage{URL: &upload.URL, DirectPath: &upload.DirectPath, MediaKey: upload.MediaKey, FileEncSHA256: upload.FileEncSHA256, FileSHA256: upload.FileSHA256, FileLength: &upload.FileLength, Mimetype: proto.String(mime), FileName: proto.String(media.FileName), Title: proto.String(media.FileName), Caption: proto.String(caption)}}
+	}
+	response, err := w.client.SendMessage(ctx, to, msg)
+	return response.ID, err
 }
 
 type manager struct {
@@ -388,21 +444,22 @@ func (w *worker) next() {
 		w.state("disconnected", "", 0)
 	case "send":
 		var p struct {
-			To   string
-			Text string
+			To    string
+			Text  string
+			Media outboundMedia
 		}
 		if json.Unmarshal(raw, &p) != nil || !w.client.IsLoggedIn() {
 			result["error"] = "whatsapp_not_connected"
 			status = "failed"
 			break
 		}
-		response, err := w.client.SendMessage(ctx, types.NewJID(p.To, types.DefaultUserServer), &waE2E.Message{Conversation: proto.String(p.Text)})
+		messageID, err := w.sendMessage(ctx, types.NewJID(p.To, types.DefaultUserServer), p.Text, p.Media)
 		if err != nil {
 			result["error"] = "delivery_unknown_check_before_retry"
 			status = "unknown"
 		} else {
-			result["message_id"] = response.ID
-			_, _ = w.db.ExecContext(ctx, `INSERT INTO messages(account_id,message_id,chat,sender,text,timestamp,from_me) VALUES($1,$2,$3,$4,$5,now(),true) ON CONFLICT DO NOTHING`, w.accountID, response.ID, types.NewJID(p.To, types.DefaultUserServer).String(), "me", p.Text)
+			result["message_id"] = messageID
+			_, _ = w.db.ExecContext(ctx, `INSERT INTO messages(account_id,message_id,chat,sender,text,timestamp,from_me) VALUES($1,$2,$3,$4,$5,now(),true) ON CONFLICT DO NOTHING`, w.accountID, messageID, types.NewJID(p.To, types.DefaultUserServer).String(), "me", p.Text)
 		}
 	case "create_group":
 		var p struct {
@@ -429,8 +486,9 @@ func (w *worker) next() {
 		}
 	case "send_group":
 		var p struct {
-			GroupID string `json:"group_id"`
-			Text    string `json:"text"`
+			GroupID string        `json:"group_id"`
+			Text    string        `json:"text"`
+			Media   outboundMedia `json:"media"`
 		}
 		if json.Unmarshal(raw, &p) != nil {
 			result["error"] = "invalid_group_or_not_connected"
@@ -443,13 +501,13 @@ func (w *worker) next() {
 			status = "failed"
 			break
 		}
-		response, err := w.client.SendMessage(ctx, groupJID, &waE2E.Message{Conversation: proto.String(p.Text)})
+		messageID, err := w.sendMessage(ctx, groupJID, p.Text, p.Media)
 		if err != nil {
 			result["error"] = "delivery_unknown_check_before_retry"
 			status = "unknown"
 		} else {
-			result["message_id"] = response.ID
-			_, _ = w.db.ExecContext(ctx, `INSERT INTO messages(account_id,message_id,chat,sender,text,timestamp,from_me) VALUES($1,$2,$3,$4,$5,now(),true) ON CONFLICT DO NOTHING`, w.accountID, response.ID, groupJID.String(), "me", p.Text)
+			result["message_id"] = messageID
+			_, _ = w.db.ExecContext(ctx, `INSERT INTO messages(account_id,message_id,chat,sender,text,timestamp,from_me) VALUES($1,$2,$3,$4,$5,now(),true) ON CONFLICT DO NOTHING`, w.accountID, messageID, groupJID.String(), "me", p.Text)
 		}
 	case "sync_groups":
 		if !w.client.IsLoggedIn() {
