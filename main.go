@@ -250,7 +250,7 @@ func handler(db *sql.DB, token string) http.Handler {
 					Data     string `json:"data"`
 				} `json:"media"`
 			}
-			dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 35<<20))
+			dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 70<<20))
 			dec.DisallowUnknownFields()
 			if dec.Decode(&body) != nil || dec.Decode(new(any)) != io.EOF || (strings.TrimSpace(body.Text) == "" && body.Media.Data == "") || len(body.Text) > 8000 || len(body.Media.Data) > 34<<20 {
 				respond(w, 400, map[string]string{"error": "text deve ter entre 1 e 8000 bytes"})
@@ -317,7 +317,7 @@ func handler(db *sql.DB, token string) http.Handler {
 						Data     string `json:"data"`
 					} `json:"media"`
 				}
-				dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 35<<20))
+			dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 70<<20))
 				dec.DisallowUnknownFields()
 				if dec.Decode(&body) != nil || dec.Decode(new(any)) != io.EOF || !phonePattern.MatchString(body.To) || (strings.TrimSpace(body.Text) == "" && body.Media.Data == "") || len(body.Text) > 8000 || len(body.Media.Data) > 34<<20 {
 					respond(w, 400, map[string]string{"error": "use to com DDI, apenas dígitos, e text entre 1 e 8000 bytes"})
