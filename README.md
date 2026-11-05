@@ -68,3 +68,6 @@ O consumidor deve manter o cursor de recebimento; as mensagens são consultadas 
 
 `go test ./...` e `go vet ./...`. Teste real requer acesso ao PostgreSQL DBaaS e pareamento pelo titular do número. A compilação local não valida a disponibilidade do recurso Daemons na conta nem a sessão WhatsApp.
 
+
+
+<!-- Deploy automático verificado em 2026-11-05 -->
