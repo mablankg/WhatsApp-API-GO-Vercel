@@ -88,6 +88,15 @@ CREATE TABLE IF NOT EXISTS app_users (
  UNIQUE(account_id, username),
  UNIQUE(account_id, email)
 );
+CREATE TABLE IF NOT EXISTS app_sessions (
+ id BIGSERIAL PRIMARY KEY,
+ user_id BIGINT NOT NULL REFERENCES app_users(id) ON DELETE CASCADE,
+ token_hash TEXT NOT NULL UNIQUE,
+ expires_at TIMESTAMPTZ NOT NULL,
+ revoked_at TIMESTAMPTZ,
+ created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS app_sessions_active_idx ON app_sessions(token_hash, expires_at) WHERE revoked_at IS NULL;
 INSERT INTO app_accounts(id,name) VALUES('bbadvocacia','BBAdvocacia') ON CONFLICT(id) DO NOTHING;
 CREATE TABLE IF NOT EXISTS state (
  id INTEGER PRIMARY KEY CHECK(id=1), status TEXT NOT NULL DEFAULT 'offline',
