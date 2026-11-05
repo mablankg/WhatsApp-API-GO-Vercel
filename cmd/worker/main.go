@@ -51,7 +51,7 @@ func (w *worker) sendMessage(ctx context.Context, to types.JID, text string, med
 	if err != nil {
 		return "", err
 	}
-	if len(raw) > 25*1024*1024 {
+	if len(raw) > 50*1024*1024 {
 		return "", errors.New("media_too_large")
 	}
 	appInfo := whatsmeow.MediaDocument
