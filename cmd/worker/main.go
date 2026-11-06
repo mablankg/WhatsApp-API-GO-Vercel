@@ -541,10 +541,13 @@ func (w *worker) next() {
 	case "delete_account":
 		// Disable persistence before disconnecting, including asynchronous media handlers.
 		w.client.Disconnect()
-		if err := w.client.Store.Delete(ctx); err != nil {
-			result["error"] = "session_delete_failed"
-			status = "failed"
-			break
+		// A newly created connection has no persisted WhatsApp device to delete.
+		if w.client.Store.ID != nil {
+			if err := w.client.Store.Delete(ctx); err != nil {
+				result["error"] = "session_delete_failed"
+				status = "failed"
+				break
+			}
 		}
 		tx, err := w.db.BeginTx(ctx, nil)
 		if err == nil {
