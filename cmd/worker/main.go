@@ -537,7 +537,22 @@ func (w *worker) next() {
 			result["contact_count"] = strconv.Itoa(count)
 		}
 	case "reset_directory":
-		if _, err := w.db.ExecContext(ctx, "DELETE FROM contacts WHERE account_id=$1; DELETE FROM groups WHERE account_id=$1", w.accountID); err != nil {
+		// Separate statements are required by PostgreSQL's parameterized protocol.
+		// Keep both deletions atomic and scoped to the selected WhatsApp account.
+		tx, err := w.db.BeginTx(ctx, nil)
+		if err == nil {
+			_, err = tx.ExecContext(ctx, "DELETE FROM contacts WHERE account_id=$1", w.accountID)
+			if err == nil {
+				_, err = tx.ExecContext(ctx, "DELETE FROM groups WHERE account_id=$1", w.accountID)
+			}
+			if err == nil {
+				err = tx.Commit()
+			} else {
+				_ = tx.Rollback()
+			}
+		}
+		if err != nil {
+			log.Printf("directory reset failed for account %s: %v", w.accountID, err)
 			result["error"] = "directory_reset_failed"
 			status = "failed"
 			break
