@@ -289,6 +289,8 @@ func (w *worker) state(status, qr string, ttl time.Duration) {
 	}
 }
 func (w *worker) event(event any) {
+	var enabled bool
+	if w.db.QueryRowContext(w.ctx, "SELECT enabled FROM whatsapp_accounts WHERE id=$1", w.accountID).Scan(&enabled) != nil || !enabled { return }
 	switch e := event.(type) {
 	case *events.Connected:
 		w.state("connected", "", 0)
@@ -536,6 +538,25 @@ func (w *worker) next() {
 		} else {
 			result["contact_count"] = strconv.Itoa(count)
 		}
+	case "delete_account":
+		// Disable persistence before disconnecting, including asynchronous media handlers.
+		w.client.Disconnect()
+		if err := w.client.Store.Delete(ctx); err != nil {
+			result["error"] = "session_delete_failed"
+			status = "failed"
+			break
+		}
+		tx, err := w.db.BeginTx(ctx, nil)
+		if err == nil {
+			for _, table := range []string{"message_media", "entity_comments", "messages", "contacts", "groups"} {
+				_, err = tx.ExecContext(ctx, "DELETE FROM "+table+" WHERE account_id=$1", w.accountID)
+				if err != nil { break }
+			}
+			if err == nil { _, err = tx.ExecContext(ctx, "DELETE FROM commands WHERE account_id=$1 AND id<>$2", w.accountID, id) }
+			if err == nil { _, err = tx.ExecContext(ctx, "UPDATE whatsapp_accounts SET enabled=false,name='Excluída',device_jid='',qr='',qr_expires=NULL,status='deleted',updated_at=now() WHERE id=$1", w.accountID) }
+			if err == nil { err = tx.Commit() } else { _ = tx.Rollback() }
+		}
+		if err != nil { result["error"]="account_delete_failed"; status="failed" } else { result["deleted"]="true" }
 	case "reset_directory":
 		// Separate statements are required by PostgreSQL's parameterized protocol.
 		// Keep both deletions atomic and scoped to the selected WhatsApp account.
