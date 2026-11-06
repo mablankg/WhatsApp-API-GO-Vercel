@@ -29,6 +29,15 @@ func handleAccounts(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 	ctx := r.Context()
 	if strings.HasPrefix(r.URL.Path, "/v1/accounts/") {
 		parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/v1/accounts/"), "/")
+		if len(parts) == 1 && accountIDPattern.MatchString(parts[0]) && r.Method == http.MethodDelete {
+			var body struct { Confirm bool `json:"confirm"` }
+			if json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&body) != nil || !body.Confirm {
+				respond(w, 400, map[string]string{"error": "confirmation_required"}); return
+			}
+			id, err := enqueueRaw(ctx, db, parts[0], "delete_account", []byte(`{}`))
+			if err != nil { respond(w, 409, map[string]string{"error": "worker_required_for_deletion"}); return }
+			respond(w, 202, map[string]string{"id": id, "status": "pending"}); return
+		}
 		if len(parts) == 1 && accountIDPattern.MatchString(parts[0]) && r.Method == http.MethodPatch {
 			var body struct {
 				Name string `json:"name"`
@@ -72,7 +81,7 @@ func handleAccounts(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 		return
 	}
 	if r.Method == http.MethodGet && r.URL.Path == "/v1/accounts" {
-		rows, err := db.QueryContext(ctx, `SELECT id,name,device_jid,status,heartbeat,enabled,created_at FROM whatsapp_accounts ORDER BY created_at,id`)
+		rows, err := db.QueryContext(ctx, `SELECT id,name,device_jid,status,heartbeat,enabled,created_at FROM whatsapp_accounts WHERE enabled=true ORDER BY created_at,id`)
 		if err != nil {
 			respond(w, 503, map[string]string{"error": "database_unavailable_or_not_initialized"})
 			return
