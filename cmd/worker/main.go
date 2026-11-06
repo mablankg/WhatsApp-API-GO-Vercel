@@ -640,26 +640,6 @@ func (w *worker) refreshContacts() (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	lidToPhone := map[string]string{}
-	rows, err := w.db.QueryContext(ctx, `SELECT lid,pn FROM whatsmeow_lid_map`)
-	if err != nil {
-		return 0, err
-	}
-	for rows.Next() {
-		var lid, phone string
-		if err = rows.Scan(&lid, &phone); err != nil {
-			rows.Close()
-			return 0, err
-		}
-		lidToPhone[lid] = phone
-	}
-	if err = rows.Err(); err != nil {
-		rows.Close()
-		return 0, err
-	}
-	if err = rows.Close(); err != nil {
-		return 0, err
-	}
 	type contactImport struct {
 		WhatsAppID string `json:"whatsapp_id"`
 		Phone      string `json:"phone"`
@@ -668,13 +648,14 @@ func (w *worker) refreshContacts() (int, error) {
 	imports := make([]contactImport, 0, len(items))
 	seen := map[string]bool{}
 	for jid, info := range items {
+		// Profile and business names alone do not establish an address-book entry.
+		name := firstContactName(info.FullName, info.FirstName)
+		if name == "" { continue }
 		phoneJID := jid
 		if jid.Server == types.HiddenUserServer {
-			phone, found := lidToPhone[jid.User]
-			if !found {
-				continue
-			}
-			phoneJID = types.NewJID(phone, types.DefaultUserServer)
+			mapped, mapErr := w.client.Store.LIDs.GetPNForLID(ctx, jid)
+			if mapErr != nil || mapped.IsEmpty() { continue }
+			phoneJID = mapped
 		}
 		if phoneJID.Server != types.DefaultUserServer || !phonePatternWorker.MatchString(phoneJID.User) {
 			continue
@@ -683,7 +664,6 @@ func (w *worker) refreshContacts() (int, error) {
 			continue
 		}
 		seen[phoneJID.User] = true
-		name := firstContactName(info.FullName, info.BusinessName, info.PushName, info.FirstName)
 		imports = append(imports, contactImport{WhatsAppID: phoneJID.String(), Phone: phoneJID.User, Name: name})
 	}
 	if len(imports) == 0 {
