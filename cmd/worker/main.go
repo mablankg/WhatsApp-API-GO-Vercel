@@ -316,7 +316,7 @@ func (m *manager) scheduleTask() error {
 	if err != nil {
 		return err
 	}
-	text := strings.TrimSpace(title)
+	text := "Tarefa: " + strings.TrimSpace(title)
 	if strings.TrimSpace(description) != "" {
 		text += "\n\n" + strings.TrimSpace(description)
 	}
@@ -328,25 +328,53 @@ func (m *manager) scheduleTask() error {
 		_ = json.Unmarshal(attachmentRaw, &media)
 	}
 	kind := "send"
-	payload := map[string]any{"text": text, "media": media}
+	var lawyerName string
 	if entityType == "contact" {
 		var phone string
-		if err = tx.QueryRowContext(ctx, `SELECT phone FROM contacts WHERE account_id=$1 AND id::text=$2 AND archived=false`, accountID, entityID).Scan(&phone); err != nil {
+		if err = tx.QueryRowContext(ctx, `
+			SELECT c.phone,COALESCE(l.name,'')
+			FROM contacts c LEFT JOIN lawyers l ON l.id=c.lawyer_id AND l.active=true
+			WHERE c.account_id=$1 AND c.id::text=$2 AND c.archived=false
+		`, accountID, entityID).Scan(&phone, &lawyerName); err != nil {
 			_, _ = tx.ExecContext(ctx, `UPDATE entity_tasks SET delivery_status='failed',delivery_error='contact_not_found',updated_at=now() WHERE id=$1`, taskID)
 			return tx.Commit()
 		}
-		payload["to"] = phone
+		if lawyerName != "" {
+			text += "\n\nAdvogado responsável: " + lawyerName
+		}
+		payload := map[string]any{"text": text, "media": media, "to": phone}
+		encoded, err := json.Marshal(payload)
+		if err != nil {
+			return err
+		}
+		return m.queueScheduledTask(ctx, tx, taskID, accountID, kind, encoded)
 	} else if entityType == "group" {
 		kind = "send_group"
-		payload["group_id"] = entityID
+		if err = tx.QueryRowContext(ctx, `
+			SELECT COALESCE(l.name,'')
+			FROM groups g LEFT JOIN lawyers l ON l.id=g.lawyer_id AND l.active=true
+			WHERE g.account_id=$1 AND g.group_id=$2 AND g.archived=false
+		`, accountID, entityID).Scan(&lawyerName); err != nil {
+			_, _ = tx.ExecContext(ctx, `UPDATE entity_tasks SET delivery_status='failed',delivery_error='group_not_found',updated_at=now() WHERE id=$1`, taskID)
+			return tx.Commit()
+		}
+		if lawyerName != "" {
+			text += "\n\nAdvogado responsável: " + lawyerName
+		}
+		payload := map[string]any{"text": text, "media": media, "group_id": entityID}
+		encoded, err := json.Marshal(payload)
+		if err != nil {
+			return err
+		}
+		return m.queueScheduledTask(ctx, tx, taskID, accountID, kind, encoded)
 	} else {
 		_, _ = tx.ExecContext(ctx, `UPDATE entity_tasks SET delivery_status='failed',delivery_error='invalid_entity',updated_at=now() WHERE id=$1`, taskID)
 		return tx.Commit()
 	}
-	encoded, err := json.Marshal(payload)
-	if err != nil {
-		return err
-	}
+	return sql.ErrNoRows
+}
+
+func (m *manager) queueScheduledTask(ctx context.Context, tx *sql.Tx, taskID int64, accountID, kind string, encoded []byte) error {
 	id, err := commandID()
 	if err != nil {
 		return err
