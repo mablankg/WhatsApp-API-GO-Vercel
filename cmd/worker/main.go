@@ -6,6 +6,9 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"io"
+	"net/http"
+	"net/url"
 	"github.com/mablankg/WhatsApp-API-GO-Vercel/internal/data"
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
@@ -26,6 +29,7 @@ import (
 )
 
 type worker struct {
+	avatarCursor int64
 	accountID string
 	db        *sql.DB
 	client    *whatsmeow.Client
@@ -177,6 +181,20 @@ func main() {
 	}()
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				for _, w := range m.workers() {
+					w.refreshContactAvatars()
+				}
+			}
+		}
+	}()
 	groupTicker := time.NewTicker(30 * time.Minute)
 	defer groupTicker.Stop()
 	for {
@@ -633,23 +651,70 @@ func (w *worker) upsertGroup(group *types.GroupInfo) {
 	}
 }
 
-func (w *worker) refreshContactAvatars(ctx context.Context) {
-	rows, err := w.db.QueryContext(ctx, `SELECT id, whatsapp_id FROM contacts WHERE account_id=$1 AND whatsapp_id <> ''`, w.accountID)
-	if err != nil { log.Printf("falha ao listar contatos para avatares: %v", err); return }
-	defer rows.Close()
+func (w *worker) refreshContactAvatars() {
+	if !w.client.IsConnected() {
+		return
+	}
+	ctx, cancel := context.WithTimeout(w.ctx, 25*time.Second)
+	defer cancel()
+	rows, err := w.db.QueryContext(ctx, "SELECT id, whatsapp_id FROM contacts WHERE account_id=$1 AND id>$2 AND NOT archived ORDER BY id LIMIT 10", w.accountID, w.avatarCursor)
+	if err != nil {
+		return
+	}
+	type target struct { id int64; jid string }
+	var targets []target
 	for rows.Next() {
-		var id int64
-		var rawJID string
-		if err := rows.Scan(&id, &rawJID); err != nil { continue }
-		jid, err := types.ParseJID(rawJID)
-		if err != nil || jid.IsEmpty() { continue }
-		info, err := w.client.GetProfilePictureInfo(ctx, jid, nil)
-		if err != nil { continue }
-		avatar := ""
-		if info != nil { avatar = info.URL }
-		if _, err := w.db.ExecContext(ctx, "UPDATE contacts SET avatar_url=$1,updated_at=now() WHERE id=$2 AND account_id=$3", avatar, id, w.accountID); err != nil {
-			log.Printf("falha ao salvar avatar do contato %d: %v", id, err)
+		var item target
+		if rows.Scan(&item.id, &item.jid) == nil {
+			targets = append(targets, item)
 		}
+	}
+	rows.Close()
+	if len(targets) == 0 {
+		w.avatarCursor = 0
+	}
+	for _, item := range targets {
+		if ctx.Err() != nil { break }
+		w.avatarCursor = item.id
+		jid, err := types.ParseJID(item.jid)
+		if err != nil || jid.IsEmpty() { continue }
+		check, done := context.WithTimeout(ctx, 5*time.Second)
+		info, err := w.client.GetProfilePictureInfo(check, jid, &whatsmeow.GetProfilePictureParams{Preview: true})
+		if errors.Is(err, whatsmeow.ErrProfilePictureNotSet) || errors.Is(err, whatsmeow.ErrProfilePictureUnauthorized) {
+			_, _ = w.db.ExecContext(check, "UPDATE contacts SET avatar_data=NULL,avatar_url='' WHERE id=$1 AND account_id=$2 AND avatar_url<>''", item.id, w.accountID)
+		} else if err == nil && info != nil {
+			raw, mime := downloadContactAvatar(check, info.URL)
+			if len(raw) > 0 {
+				src := "data:" + mime + ";base64," + base64.StdEncoding.EncodeToString(raw)
+				_, err = w.db.ExecContext(check, "UPDATE contacts SET avatar_data=$1,avatar_mime=$2,avatar_url=$3 WHERE id=$4 AND account_id=$5 AND avatar_url IS DISTINCT FROM $3", raw, mime, src, item.id, w.accountID)
+				if err != nil { log.Print("falha ao armazenar foto de contato") }
+			}
+		}
+		done()
+	}
+}
+
+func downloadContactAvatar(ctx context.Context, rawURL string) ([]byte, string) {
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Scheme != "https" || u.User != nil || !strings.HasSuffix(u.Hostname(), ".whatsapp.net") || u.Port() != "" {
+		return nil, ""
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil { return nil, "" }
+	client := http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	resp, err := client.Do(req)
+	if err != nil { return nil, "" }
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK { return nil, "" }
+	const maxBytes = 12 * 1024
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes+1))
+	if err != nil || len(raw) > maxBytes { return nil, "" }
+	mime := http.DetectContentType(raw)
+	switch mime {
+	case "image/jpeg", "image/png", "image/webp":
+		return raw, mime
+	default:
+		return nil, ""
 	}
 }
 
@@ -687,7 +752,7 @@ func (w *worker) refreshContacts() (int, error) {
 		imports = append(imports, contactImport{WhatsAppID: phoneJID.String(), Phone: phoneJID.User, Name: name})
 	}
 	if len(imports) == 0 {
-		w.refreshContactAvatars(ctx)
+
 		return 0, nil
 	}
 	payload, err := json.Marshal(imports)
@@ -716,7 +781,7 @@ func (w *worker) refreshContacts() (int, error) {
 	if err = tx.Commit(); err != nil {
 		return 0, err
 	}
-	w.refreshContactAvatars(ctx)
+
 	return len(imports), nil
 }
 
