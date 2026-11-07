@@ -73,6 +73,10 @@ func handler(db *sql.DB, token string) http.Handler {
 			handleProcesses(w, r, db)
 			return
 		}
+		if strings.HasPrefix(r.URL.Path, "/v1/tasks") {
+			handleTasks(w, r, db)
+			return
+		}
 		if r.Method == http.MethodPost && r.URL.Path == "/v1/directory/reset" {
 			id, err := enqueueRaw(ctx, db, requestAccount(r), "reset_directory", []byte(`{}`))
 			if err != nil {

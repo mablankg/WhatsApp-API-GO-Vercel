@@ -235,6 +235,19 @@ CREATE TABLE IF NOT EXISTS entity_comments (
 CREATE INDEX IF NOT EXISTS entity_comments_lookup ON entity_comments(entity_type,entity_id,created_at DESC);
 ALTER TABLE entity_comments ADD COLUMN IF NOT EXISTS account_id TEXT NOT NULL DEFAULT 'primary';
 CREATE INDEX IF NOT EXISTS entity_comments_account_lookup ON entity_comments(account_id,entity_type,entity_id,created_at DESC);
+CREATE TABLE IF NOT EXISTS entity_tasks (
+ id BIGSERIAL PRIMARY KEY,
+ account_id TEXT NOT NULL REFERENCES whatsapp_accounts(id) ON DELETE CASCADE,
+ entity_type TEXT NOT NULL CHECK(entity_type IN ('contact','group')),
+ entity_id TEXT NOT NULL,
+ title TEXT NOT NULL CHECK(length(trim(title)) BETWEEN 1 AND 300),
+ due_at TIMESTAMPTZ NOT NULL,
+ status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','done','cancelled')),
+ created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+ updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS entity_tasks_lookup
+ ON entity_tasks(account_id,entity_type,entity_id,status,due_at,created_at);
 CREATE TABLE IF NOT EXISTS legal_processes (
  id BIGSERIAL PRIMARY KEY,
  app_account_id TEXT NOT NULL REFERENCES app_accounts(id) ON DELETE CASCADE,
@@ -288,6 +301,7 @@ ALTER TABLE contacts ENABLE ROW LEVEL SECURITY;
 ALTER TABLE attendance_stages ENABLE ROW LEVEL SECURITY;
 ALTER TABLE lawyers ENABLE ROW LEVEL SECURITY;
 ALTER TABLE entity_comments ENABLE ROW LEVEL SECURITY;
+ALTER TABLE entity_tasks ENABLE ROW LEVEL SECURITY;
 ALTER TABLE legal_processes ENABLE ROW LEVEL SECURITY;
 ALTER TABLE legal_process_entities ENABLE ROW LEVEL SECURITY;
 ALTER TABLE legal_process_messages ENABLE ROW LEVEL SECURITY;
