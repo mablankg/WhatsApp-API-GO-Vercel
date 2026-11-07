@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -10,15 +11,29 @@ import (
 	"time"
 )
 
+type taskAttachment struct {
+	Type     string `json:"type"`
+	MimeType string `json:"mime_type"`
+	FileName string `json:"file_name"`
+	Caption  string `json:"caption"`
+	Data     string `json:"data"`
+}
+
 type entityTask struct {
-	ID         int64     `json:"id"`
-	EntityType string    `json:"entity_type"`
-	EntityID   string    `json:"entity_id"`
-	Title      string    `json:"title"`
-	DueAt      time.Time `json:"due_at"`
-	Status     string    `json:"status"`
-	CreatedAt  time.Time `json:"created_at"`
-	UpdatedAt  time.Time `json:"updated_at"`
+	ID             int64          `json:"id"`
+	EntityType     string         `json:"entity_type"`
+	EntityID       string         `json:"entity_id"`
+	Title          string         `json:"title"`
+	Description    string         `json:"description"`
+	LinkURL        string         `json:"link_url"`
+	Attachment     taskAttachment `json:"attachment"`
+	DueAt          time.Time      `json:"due_at"`
+	Status         string         `json:"status"`
+	DeliveryStatus string         `json:"delivery_status"`
+	DeliveryError  string         `json:"delivery_error,omitempty"`
+	SentAt         *time.Time     `json:"sent_at,omitempty"`
+	CreatedAt      time.Time      `json:"created_at"`
+	UpdatedAt      time.Time      `json:"updated_at"`
 }
 
 func taskEntity(r *http.Request) (string, string, bool) {
@@ -29,9 +44,16 @@ func taskEntity(r *http.Request) (string, string, bool) {
 
 func scanTask(scanner interface{ Scan(...any) error }) (entityTask, error) {
 	var task entityTask
-	err := scanner.Scan(&task.ID, &task.EntityType, &task.EntityID, &task.Title, &task.DueAt, &task.Status, &task.CreatedAt, &task.UpdatedAt)
+	var attachment []byte
+	err := scanner.Scan(&task.ID, &task.EntityType, &task.EntityID, &task.Title, &task.Description, &task.LinkURL, &attachment, &task.DueAt, &task.Status, &task.DeliveryStatus, &task.DeliveryError, &task.SentAt, &task.CreatedAt, &task.UpdatedAt)
+	if err == nil && len(attachment) > 0 {
+		_ = json.Unmarshal(attachment, &task.Attachment)
+		task.Attachment.Data = ""
+	}
 	return task, err
 }
+
+const taskColumns = `id,entity_type,entity_id,title,description,link_url,attachment,due_at,status,delivery_status,delivery_error,sent_at,created_at,updated_at`
 
 func handleTasks(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 	ctx := r.Context()
@@ -48,7 +70,7 @@ func handleTasks(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 			return
 		}
 		rows, err := db.QueryContext(ctx, `
-			SELECT id,entity_type,entity_id,title,due_at,status,created_at,updated_at
+			SELECT `+taskColumns+`
 			FROM entity_tasks
 			WHERE account_id=$1 AND entity_type=$2 AND entity_id=$3
 			ORDER BY CASE status WHEN 'pending' THEN 0 ELSE 1 END,due_at,created_at
@@ -79,25 +101,42 @@ func handleTasks(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 			return
 		}
 		var body struct {
-			Title string    `json:"title"`
-			DueAt time.Time `json:"due_at"`
+			Title       string         `json:"title"`
+			Description string         `json:"description"`
+			LinkURL     string         `json:"link_url"`
+			Attachment  taskAttachment `json:"attachment"`
+			DueAt       time.Time      `json:"due_at"`
 		}
-		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16384))
+		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 72*1024*1024))
 		decoder.DisallowUnknownFields()
 		if decoder.Decode(&body) != nil || decoder.Decode(new(any)) != io.EOF {
 			respond(w, http.StatusBadRequest, map[string]string{"error": "invalid_task"})
 			return
 		}
 		body.Title = strings.TrimSpace(body.Title)
-		if body.Title == "" || len(body.Title) > 300 || body.DueAt.IsZero() {
+		body.Description = strings.TrimSpace(body.Description)
+		body.LinkURL = strings.TrimSpace(body.LinkURL)
+		if body.Title == "" || len(body.Title) > 300 || len(body.Description) > 8000 || len(body.LinkURL) > 2000 || body.DueAt.IsZero() {
 			respond(w, http.StatusBadRequest, map[string]string{"error": "invalid_task"})
 			return
 		}
+		if body.LinkURL != "" && !strings.HasPrefix(body.LinkURL, "https://") && !strings.HasPrefix(body.LinkURL, "http://") {
+			respond(w, http.StatusBadRequest, map[string]string{"error": "invalid_task_link"})
+			return
+		}
+		if body.Attachment.Data != "" {
+			raw, err := base64.StdEncoding.DecodeString(body.Attachment.Data)
+			if err != nil || len(raw) > 50*1024*1024 || len(body.Attachment.FileName) > 255 {
+				respond(w, http.StatusBadRequest, map[string]string{"error": "invalid_task_attachment"})
+				return
+			}
+		}
+		attachment, _ := json.Marshal(body.Attachment)
 		task, err := scanTask(db.QueryRowContext(ctx, `
-			INSERT INTO entity_tasks(account_id,entity_type,entity_id,title,due_at)
-			VALUES($1,$2,$3,$4,$5)
-			RETURNING id,entity_type,entity_id,title,due_at,status,created_at,updated_at
-		`, accountID, entityType, entityID, body.Title, body.DueAt))
+			INSERT INTO entity_tasks(account_id,entity_type,entity_id,title,description,link_url,attachment,due_at)
+			VALUES($1,$2,$3,$4,$5,$6,$7,$8)
+			RETURNING `+taskColumns+`
+		`, accountID, entityType, entityID, body.Title, body.Description, body.LinkURL, attachment, body.DueAt))
 		if err != nil {
 			respond(w, http.StatusServiceUnavailable, map[string]string{"error": "task_not_saved"})
 			return
@@ -124,7 +163,7 @@ func handleTasks(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 		task, err := scanTask(db.QueryRowContext(ctx, `
 			UPDATE entity_tasks SET status=$3,updated_at=now()
 			WHERE id=$1 AND account_id=$2
-			RETURNING id,entity_type,entity_id,title,due_at,status,created_at,updated_at
+			RETURNING `+taskColumns+`
 		`, id, accountID, body.Status))
 		if err == sql.ErrNoRows {
 			respond(w, http.StatusNotFound, map[string]string{"error": "task_not_found"})
@@ -138,7 +177,24 @@ func handleTasks(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 		return
 	}
 	if r.Method == http.MethodDelete {
-		result, err := db.ExecContext(ctx, `DELETE FROM entity_tasks WHERE id=$1 AND account_id=$2`, id, accountID)
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			respond(w, http.StatusServiceUnavailable, map[string]string{"error": "task_not_deleted"})
+			return
+		}
+		defer tx.Rollback()
+		var commandID string
+		if err = tx.QueryRowContext(ctx, `SELECT command_id FROM entity_tasks WHERE id=$1 AND account_id=$2 FOR UPDATE`, id, accountID).Scan(&commandID); err == sql.ErrNoRows {
+			respond(w, http.StatusNotFound, map[string]string{"error": "task_not_found"})
+			return
+		} else if err != nil {
+			respond(w, http.StatusServiceUnavailable, map[string]string{"error": "task_not_deleted"})
+			return
+		}
+		if commandID != "" {
+			_, _ = tx.ExecContext(ctx, `DELETE FROM commands WHERE id=$1 AND status='pending'`, commandID)
+		}
+		result, err := tx.ExecContext(ctx, `DELETE FROM entity_tasks WHERE id=$1 AND account_id=$2`, id, accountID)
 		if err != nil {
 			respond(w, http.StatusServiceUnavailable, map[string]string{"error": "task_not_deleted"})
 			return
@@ -146,6 +202,10 @@ func handleTasks(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 		rows, _ := result.RowsAffected()
 		if rows == 0 {
 			respond(w, http.StatusNotFound, map[string]string{"error": "task_not_found"})
+			return
+		}
+		if err = tx.Commit(); err != nil {
+			respond(w, http.StatusServiceUnavailable, map[string]string{"error": "task_not_deleted"})
 			return
 		}
 		respond(w, http.StatusOK, map[string]bool{"deleted": true})

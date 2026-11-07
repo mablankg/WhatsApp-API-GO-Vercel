@@ -241,13 +241,29 @@ CREATE TABLE IF NOT EXISTS entity_tasks (
  entity_type TEXT NOT NULL CHECK(entity_type IN ('contact','group')),
  entity_id TEXT NOT NULL,
  title TEXT NOT NULL CHECK(length(trim(title)) BETWEEN 1 AND 300),
+ description TEXT NOT NULL DEFAULT '',
+ link_url TEXT NOT NULL DEFAULT '',
+ attachment JSONB NOT NULL DEFAULT '{}',
  due_at TIMESTAMPTZ NOT NULL,
  status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','done','cancelled')),
+ delivery_status TEXT NOT NULL DEFAULT 'scheduled' CHECK(delivery_status IN ('scheduled','queued','sent','failed')),
+ command_id TEXT NOT NULL DEFAULT '',
+ delivery_error TEXT NOT NULL DEFAULT '',
+ sent_at TIMESTAMPTZ,
  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+ALTER TABLE entity_tasks ADD COLUMN IF NOT EXISTS description TEXT NOT NULL DEFAULT '';
+ALTER TABLE entity_tasks ADD COLUMN IF NOT EXISTS link_url TEXT NOT NULL DEFAULT '';
+ALTER TABLE entity_tasks ADD COLUMN IF NOT EXISTS attachment JSONB NOT NULL DEFAULT '{}';
+ALTER TABLE entity_tasks ADD COLUMN IF NOT EXISTS delivery_status TEXT NOT NULL DEFAULT 'scheduled';
+ALTER TABLE entity_tasks ADD COLUMN IF NOT EXISTS command_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE entity_tasks ADD COLUMN IF NOT EXISTS delivery_error TEXT NOT NULL DEFAULT '';
+ALTER TABLE entity_tasks ADD COLUMN IF NOT EXISTS sent_at TIMESTAMPTZ;
 CREATE INDEX IF NOT EXISTS entity_tasks_lookup
  ON entity_tasks(account_id,entity_type,entity_id,status,due_at,created_at);
+CREATE INDEX IF NOT EXISTS entity_tasks_delivery
+ ON entity_tasks(due_at,id) WHERE delivery_status='scheduled' AND status='pending';
 CREATE TABLE IF NOT EXISTS legal_processes (
  id BIGSERIAL PRIMARY KEY,
  app_account_id TEXT NOT NULL REFERENCES app_accounts(id) ON DELETE CASCADE,

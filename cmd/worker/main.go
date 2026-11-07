@@ -2,13 +2,12 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"io"
-	"net/http"
-	"net/url"
 	"github.com/mablankg/WhatsApp-API-GO-Vercel/internal/data"
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
@@ -17,7 +16,10 @@ import (
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 	"google.golang.org/protobuf/proto"
+	"io"
 	"log"
+	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"regexp"
@@ -30,12 +32,12 @@ import (
 
 type worker struct {
 	avatarCursor int64
-	accountID string
-	db        *sql.DB
-	client    *whatsmeow.Client
-	mu        sync.Mutex
-	pairing   bool
-	ctx       context.Context
+	accountID    string
+	db           *sql.DB
+	client       *whatsmeow.Client
+	mu           sync.Mutex
+	pairing      bool
+	ctx          context.Context
 }
 
 type outboundMedia struct {
@@ -83,6 +85,11 @@ func (w *worker) sendMessage(ctx context.Context, to types.JID, text string, med
 	if media.Type == "image" {
 		msg = &waE2E.Message{ImageMessage: &waE2E.ImageMessage{URL: &upload.URL, DirectPath: &upload.DirectPath, MediaKey: upload.MediaKey, FileEncSHA256: upload.FileEncSHA256, FileSHA256: upload.FileSHA256, FileLength: &upload.FileLength, Mimetype: proto.String(mime), Caption: proto.String(caption)}}
 	} else if media.Type == "audio" {
+		if strings.TrimSpace(text) != "" {
+			if _, err := w.client.SendMessage(ctx, to, &waE2E.Message{Conversation: proto.String(text)}); err != nil {
+				return "", err
+			}
+		}
 		msg = &waE2E.Message{AudioMessage: &waE2E.AudioMessage{URL: &upload.URL, DirectPath: &upload.DirectPath, MediaKey: upload.MediaKey, FileEncSHA256: upload.FileEncSHA256, FileSHA256: upload.FileSHA256, FileLength: &upload.FileLength, Mimetype: proto.String(mime), PTT: proto.Bool(false), StreamingSidecar: upload.StreamingSidecar}}
 	} else if media.Type == "video" {
 		msg = &waE2E.Message{VideoMessage: &waE2E.VideoMessage{URL: &upload.URL, DirectPath: &upload.DirectPath, MediaKey: upload.MediaKey, FileEncSHA256: upload.FileEncSHA256, FileSHA256: upload.FileSHA256, FileLength: &upload.FileLength, Mimetype: proto.String(mime), Caption: proto.String(caption)}}
@@ -205,6 +212,9 @@ func main() {
 			if err := m.syncAccounts(); err != nil {
 				log.Print("falha ao atualizar conexões")
 			}
+			if err := m.scheduleTask(); err != nil && !errors.Is(err, sql.ErrNoRows) {
+				log.Printf("falha ao agendar tarefa: %v", err)
+			}
 			m.next()
 		case <-groupTicker.C:
 			m.refreshGroups()
@@ -276,6 +286,79 @@ func (m *manager) next() {
 		w.next()
 	}
 }
+
+func commandID() (string, error) {
+	raw := make([]byte, 16)
+	if _, err := rand.Read(raw); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(raw), nil
+}
+
+func (m *manager) scheduleTask() error {
+	ctx, cancel := context.WithTimeout(m.ctx, 5*time.Second)
+	defer cancel()
+	tx, err := m.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var taskID int64
+	var accountID, entityType, entityID, title, description, linkURL string
+	var attachmentRaw []byte
+	err = tx.QueryRowContext(ctx, `
+		SELECT id,account_id,entity_type,entity_id,title,description,link_url,attachment
+		FROM entity_tasks
+		WHERE status='pending' AND delivery_status='scheduled' AND due_at<=now()
+		ORDER BY due_at,id
+		LIMIT 1 FOR UPDATE SKIP LOCKED
+	`).Scan(&taskID, &accountID, &entityType, &entityID, &title, &description, &linkURL, &attachmentRaw)
+	if err != nil {
+		return err
+	}
+	text := strings.TrimSpace(title)
+	if strings.TrimSpace(description) != "" {
+		text += "\n\n" + strings.TrimSpace(description)
+	}
+	if strings.TrimSpace(linkURL) != "" {
+		text += "\n\n" + strings.TrimSpace(linkURL)
+	}
+	var media outboundMedia
+	if len(attachmentRaw) > 0 {
+		_ = json.Unmarshal(attachmentRaw, &media)
+	}
+	kind := "send"
+	payload := map[string]any{"text": text, "media": media}
+	if entityType == "contact" {
+		var phone string
+		if err = tx.QueryRowContext(ctx, `SELECT phone FROM contacts WHERE account_id=$1 AND id::text=$2 AND archived=false`, accountID, entityID).Scan(&phone); err != nil {
+			_, _ = tx.ExecContext(ctx, `UPDATE entity_tasks SET delivery_status='failed',delivery_error='contact_not_found',updated_at=now() WHERE id=$1`, taskID)
+			return tx.Commit()
+		}
+		payload["to"] = phone
+	} else if entityType == "group" {
+		kind = "send_group"
+		payload["group_id"] = entityID
+	} else {
+		_, _ = tx.ExecContext(ctx, `UPDATE entity_tasks SET delivery_status='failed',delivery_error='invalid_entity',updated_at=now() WHERE id=$1`, taskID)
+		return tx.Commit()
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	id, err := commandID()
+	if err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO commands(id,account_id,kind,payload) VALUES($1,$2,$3,$4)`, id, accountID, kind, encoded); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE entity_tasks SET delivery_status='queued',command_id=$2,delivery_error='',updated_at=now() WHERE id=$1`, taskID, id); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
 func (m *manager) refreshGroups() {
 	for _, w := range m.workers() {
 		go w.refreshGroups()
@@ -308,7 +391,9 @@ func (w *worker) state(status, qr string, ttl time.Duration) {
 }
 func (w *worker) event(event any) {
 	var enabled bool
-	if w.db.QueryRowContext(w.ctx, "SELECT enabled FROM whatsapp_accounts WHERE id=$1", w.accountID).Scan(&enabled) != nil || !enabled { return }
+	if w.db.QueryRowContext(w.ctx, "SELECT enabled FROM whatsapp_accounts WHERE id=$1", w.accountID).Scan(&enabled) != nil || !enabled {
+		return
+	}
 	switch e := event.(type) {
 	case *events.Connected:
 		w.state("connected", "", 0)
@@ -570,13 +655,28 @@ func (w *worker) next() {
 		if err == nil {
 			for _, table := range []string{"message_media", "entity_comments", "messages", "contacts", "groups"} {
 				_, err = tx.ExecContext(ctx, "DELETE FROM "+table+" WHERE account_id=$1", w.accountID)
-				if err != nil { break }
+				if err != nil {
+					break
+				}
 			}
-			if err == nil { _, err = tx.ExecContext(ctx, "DELETE FROM commands WHERE account_id=$1 AND id<>$2", w.accountID, id) }
-			if err == nil { _, err = tx.ExecContext(ctx, "UPDATE whatsapp_accounts SET enabled=false,name='Excluída',device_jid='',qr='',qr_expires=NULL,status='deleted',updated_at=now() WHERE id=$1", w.accountID) }
-			if err == nil { err = tx.Commit() } else { _ = tx.Rollback() }
+			if err == nil {
+				_, err = tx.ExecContext(ctx, "DELETE FROM commands WHERE account_id=$1 AND id<>$2", w.accountID, id)
+			}
+			if err == nil {
+				_, err = tx.ExecContext(ctx, "UPDATE whatsapp_accounts SET enabled=false,name='Excluída',device_jid='',qr='',qr_expires=NULL,status='deleted',updated_at=now() WHERE id=$1", w.accountID)
+			}
+			if err == nil {
+				err = tx.Commit()
+			} else {
+				_ = tx.Rollback()
+			}
 		}
-		if err != nil { result["error"]="account_delete_failed"; status="failed" } else { result["deleted"]="true" }
+		if err != nil {
+			result["error"] = "account_delete_failed"
+			status = "failed"
+		} else {
+			result["deleted"] = "true"
+		}
 	case "reset_directory":
 		// Separate statements are required by PostgreSQL's parameterized protocol.
 		// Keep both deletions atomic and scoped to the selected WhatsApp account.
@@ -610,6 +710,17 @@ func (w *worker) next() {
 	if _, err = w.db.ExecContext(saveCtx, "UPDATE commands SET status=$2,result=$3 WHERE id=$1", id, status, string(encoded)); err != nil {
 		log.Print("falha ao salvar resultado; comando não será reenviado automaticamente")
 	}
+	deliveryStatus := "failed"
+	sentAt := any(nil)
+	if status == "done" {
+		deliveryStatus = "sent"
+		sentAt = time.Now()
+	}
+	_, _ = w.db.ExecContext(saveCtx, `
+		UPDATE entity_tasks
+		SET delivery_status=$2,delivery_error=$3,sent_at=$4,updated_at=now()
+		WHERE command_id=$1
+	`, id, deliveryStatus, result["error"], sentAt)
 }
 
 func (w *worker) refreshGroups() (int, error) {
@@ -660,7 +771,10 @@ func (w *worker) refreshContactAvatars() {
 	if err != nil {
 		return
 	}
-	type target struct { id int64; jid string }
+	type target struct {
+		id  int64
+		jid string
+	}
 	var targets []target
 	for rows.Next() {
 		var item target
@@ -673,10 +787,14 @@ func (w *worker) refreshContactAvatars() {
 		w.avatarCursor = 0
 	}
 	for _, item := range targets {
-		if ctx.Err() != nil { break }
+		if ctx.Err() != nil {
+			break
+		}
 		w.avatarCursor = item.id
 		jid, err := types.ParseJID(item.jid)
-		if err != nil || jid.IsEmpty() { continue }
+		if err != nil || jid.IsEmpty() {
+			continue
+		}
 		check, done := context.WithTimeout(ctx, 5*time.Second)
 		info, err := w.client.GetProfilePictureInfo(check, jid, &whatsmeow.GetProfilePictureParams{Preview: true})
 		if errors.Is(err, whatsmeow.ErrProfilePictureNotSet) || errors.Is(err, whatsmeow.ErrProfilePictureUnauthorized) {
@@ -686,7 +804,9 @@ func (w *worker) refreshContactAvatars() {
 			if len(raw) > 0 {
 				src := "data:" + mime + ";base64," + base64.StdEncoding.EncodeToString(raw)
 				_, err = w.db.ExecContext(check, "UPDATE contacts SET avatar_url=$1 WHERE id=$2 AND account_id=$3 AND avatar_url IS DISTINCT FROM $1", src, item.id, w.accountID)
-				if err != nil { log.Print("falha ao armazenar foto de contato") }
+				if err != nil {
+					log.Print("falha ao armazenar foto de contato")
+				}
 			}
 		}
 		done()
@@ -712,14 +832,22 @@ func downloadContactAvatar(ctx context.Context, rawURL string, maxBytes int64) (
 		return nil, ""
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
-	if err != nil { return nil, "" }
+	if err != nil {
+		return nil, ""
+	}
 	client := http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	resp, err := client.Do(req)
-	if err != nil { return nil, "" }
+	if err != nil {
+		return nil, ""
+	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK { return nil, "" }
+	if resp.StatusCode != http.StatusOK {
+		return nil, ""
+	}
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes+1))
-	if err != nil || int64(len(raw)) > maxBytes { return nil, "" }
+	if err != nil || int64(len(raw)) > maxBytes {
+		return nil, ""
+	}
 	mime := http.DetectContentType(raw)
 	switch mime {
 	case "image/jpeg", "image/png", "image/webp":
@@ -746,11 +874,15 @@ func (w *worker) refreshContacts() (int, error) {
 	for jid, info := range items {
 		// Profile and business names alone do not establish an address-book entry.
 		name := firstContactName(info.FullName, info.FirstName, info.PushName)
-		if name == "" { continue }
+		if name == "" {
+			continue
+		}
 		phoneJID := jid
 		if jid.Server == types.HiddenUserServer {
 			mapped, mapErr := w.client.Store.LIDs.GetPNForLID(ctx, jid)
-			if mapErr != nil || mapped.IsEmpty() { continue }
+			if mapErr != nil || mapped.IsEmpty() {
+				continue
+			}
 			phoneJID = mapped
 		}
 		if phoneJID.Server != types.DefaultUserServer || !phonePatternWorker.MatchString(phoneJID.User) {
@@ -806,4 +938,3 @@ func firstContactName(values ...string) string {
 	}
 	return ""
 }
-
