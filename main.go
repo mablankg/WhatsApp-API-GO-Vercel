@@ -135,7 +135,8 @@ func handler(db *sql.DB, token string) http.Handler {
 				w.Write(png)
 			}
 		case r.Method == "GET" && r.URL.Path == "/v1/groups":
-			rows, err := db.QueryContext(ctx, `SELECT group_id,name,topic,participant_count,is_announce,attendance_stage,priority,updated_at,COALESCE(lawyer_id,0),COALESCE((SELECT name FROM lawyers WHERE id=groups.lawyer_id),''),COALESCE((SELECT color FROM lawyers WHERE id=groups.lawyer_id),''),archived FROM groups WHERE account_id=$1 AND archived=false ORDER BY lower(name),group_id`, requestAccount(r))
+			archived := r.URL.Query().Get("archived") == "true"
+			rows, err := db.QueryContext(ctx, `SELECT group_id,name,topic,participant_count,is_announce,attendance_stage,priority,updated_at,COALESCE(lawyer_id,0),COALESCE((SELECT name FROM lawyers WHERE id=groups.lawyer_id),''),COALESCE((SELECT color FROM lawyers WHERE id=groups.lawyer_id),''),archived FROM groups WHERE account_id=$1 AND archived=$2 ORDER BY lower(name),group_id`, requestAccount(r), archived)
 			if err != nil {
 				fail()
 				return
