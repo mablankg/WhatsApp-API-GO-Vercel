@@ -82,6 +82,10 @@ func handler(db *sql.DB, token string) http.Handler {
 			handleContacts(w, r, db)
 			return
 		}
+		if r.URL.Path == "/v1/message-status" {
+			handleMessageStatus(w, r, db)
+			return
+		}
 		if r.URL.Path == "/v1/comments" {
 			handleComments(w, r, db)
 			return
@@ -444,3 +448,39 @@ func isGroupMessagePath(path string) bool {
 	return strings.HasPrefix(path, "/v1/groups/") && strings.HasSuffix(path, "/messages")
 }
 
+
+func handleMessageStatus(w http.ResponseWriter, r *http.Request, db *sql.DB) {
+	ctx := r.Context()
+	seq, err := strconv.ParseInt(r.URL.Query().Get("seq"), 10, 64)
+	if err != nil || seq < 1 {
+		respond(w, 400, map[string]string{"error": "invalid_message"})
+		return
+	}
+	account := requestAccount(r)
+	var status string
+	switch r.Method {
+	case http.MethodGet:
+		err = db.QueryRowContext(ctx, "SELECT COALESCE(s.status,'') FROM messages m LEFT JOIN legal_message_status s ON s.account_id=m.account_id AND s.message_seq=m.seq WHERE m.account_id=$1 AND m.seq=$2", account, seq).Scan(&status)
+	case http.MethodPost:
+		var body struct { Status string `json:"status"` }
+		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1024))
+		if decoder.Decode(&body) != nil || (body.Status != "pending" && body.Status != "in_review" && body.Status != "done") {
+			respond(w, 400, map[string]string{"error": "invalid_status"})
+			return
+		}
+		err = db.QueryRowContext(ctx, "INSERT INTO legal_message_status(account_id,message_seq,status) SELECT account_id,seq,$3 FROM messages WHERE account_id=$1 AND seq=$2 ON CONFLICT(account_id,message_seq) DO UPDATE SET status=excluded.status,updated_at=now() RETURNING status", account, seq, body.Status).Scan(&status)
+	default:
+		w.Header().Set("Allow", "GET, POST")
+		respond(w, 405, map[string]string{"error": "method_not_allowed"})
+		return
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		respond(w, 404, map[string]string{"error": "message_not_found"})
+		return
+	}
+	if err != nil {
+		respond(w, 503, map[string]string{"error": "message_status_unavailable"})
+		return
+	}
+	respond(w, 200, map[string]string{"status": status})
+}
