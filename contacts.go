@@ -14,6 +14,24 @@ import (
 	"github.com/lib/pq"
 )
 
+var contactAvatarPattern = regexp.MustCompile(`^/v1/contacts/([1-9][0-9]{0,18})/avatarpackage main
+
+import (
+	"crypto/rand"
+	"database/sql"
+	"encoding/hex"
+	"encoding/json"
+	"io"
+	"net/http"
+	"regexp"
+	"strings"
+	"time"
+
+	"github.com/lib/pq"
+)
+
+)
+
 var contactIDPattern = regexp.MustCompile(`^[1-9][0-9]{0,18}$`)
 var contactMessagesPattern = regexp.MustCompile(`^/v1/contacts/([1-9][0-9]{0,18})/messages$`)
 var stagePathPattern = regexp.MustCompile(`^/v1/contacts/stages/([a-z0-9_]{1,40})$`)
@@ -65,6 +83,29 @@ func scanContact(scanner interface{ Scan(...any) error }) (contact, error) {
 
 func handleContacts(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 	ctx := r.Context()
+	if match := contactAvatarPattern.FindStringSubmatch(r.URL.Path); match != nil {
+		if r.Method != http.MethodGet {
+			w.Header().Set("Allow", "GET")
+			respond(w, 405, map[string]string{"error": "method_not_allowed"})
+			return
+		}
+		var raw []byte
+		var mime string
+		err := db.QueryRowContext(ctx, "SELECT avatar_data,avatar_mime FROM contacts WHERE id=$1 AND account_id=$2 AND avatar_data IS NOT NULL", match[1], requestAccount(r)).Scan(&raw, &mime)
+		if err == sql.ErrNoRows {
+			respond(w, 404, map[string]string{"error": "avatar_not_found"})
+			return
+		}
+		if err != nil {
+			respond(w, 503, map[string]string{"error": "avatar_unavailable"})
+			return
+		}
+		w.Header().Set("Cache-Control", "private, no-store")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Content-Type", mime)
+		_, _ = w.Write(raw)
+		return
+	}
 	if r.URL.Path == "/v1/contacts/stages" {
 		if r.Method == http.MethodGet {
 			rows, err := db.QueryContext(ctx, "SELECT id,name,color,position FROM attendance_stages WHERE active=true ORDER BY position,id")
