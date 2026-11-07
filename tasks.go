@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
@@ -20,20 +21,23 @@ type taskAttachment struct {
 }
 
 type entityTask struct {
-	ID             int64          `json:"id"`
-	EntityType     string         `json:"entity_type"`
-	EntityID       string         `json:"entity_id"`
-	Title          string         `json:"title"`
-	Description    string         `json:"description"`
-	LinkURL        string         `json:"link_url"`
-	Attachment     taskAttachment `json:"attachment"`
-	DueAt          time.Time      `json:"due_at"`
-	Status         string         `json:"status"`
-	DeliveryStatus string         `json:"delivery_status"`
-	DeliveryError  string         `json:"delivery_error,omitempty"`
-	SentAt         *time.Time     `json:"sent_at,omitempty"`
-	CreatedAt      time.Time      `json:"created_at"`
-	UpdatedAt      time.Time      `json:"updated_at"`
+	ID                  int64          `json:"id"`
+	EntityType          string         `json:"entity_type"`
+	EntityID            string         `json:"entity_id"`
+	Title               string         `json:"title"`
+	Description         string         `json:"description"`
+	LinkURL             string         `json:"link_url"`
+	Attachment          taskAttachment `json:"attachment"`
+	DueAt               time.Time      `json:"due_at"`
+	Status              string         `json:"status"`
+	DeliveryStatus      string         `json:"delivery_status"`
+	DeliveryError       string         `json:"delivery_error,omitempty"`
+	SentAt              *time.Time     `json:"sent_at,omitempty"`
+	WhatsAppAccountID   string         `json:"whatsapp_account_id"`
+	WhatsAppAccountName string         `json:"whatsapp_account_name"`
+	WhatsAppDeviceJID   string         `json:"whatsapp_device_jid"`
+	CreatedAt           time.Time      `json:"created_at"`
+	UpdatedAt           time.Time      `json:"updated_at"`
 }
 
 func taskEntity(r *http.Request) (string, string, bool) {
@@ -51,6 +55,11 @@ func scanTask(scanner interface{ Scan(...any) error }) (entityTask, error) {
 		task.Attachment.Data = ""
 	}
 	return task, err
+}
+
+func decorateTask(ctx context.Context, db *sql.DB, task *entityTask, accountID string) error {
+	task.WhatsAppAccountID = accountID
+	return db.QueryRowContext(ctx, `SELECT name,device_jid FROM whatsapp_accounts WHERE id=$1`, accountID).Scan(&task.WhatsAppAccountName, &task.WhatsAppDeviceJID)
 }
 
 const taskColumns = `id,entity_type,entity_id,title,description,link_url,attachment,due_at,status,delivery_status,delivery_error,sent_at,created_at,updated_at`
@@ -89,6 +98,10 @@ func handleTasks(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 				return
 			}
 			tasks = append(tasks, task)
+			if err := decorateTask(ctx, db, &tasks[len(tasks)-1], accountID); err != nil {
+				respond(w, http.StatusServiceUnavailable, map[string]string{"error": "tasks_unavailable"})
+				return
+			}
 		}
 		respond(w, http.StatusOK, map[string]any{"tasks": tasks})
 		return
@@ -139,6 +152,10 @@ func handleTasks(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 		`, accountID, entityType, entityID, body.Title, body.Description, body.LinkURL, string(attachment), body.DueAt))
 		if err != nil {
 			respond(w, http.StatusServiceUnavailable, map[string]string{"error": "task_not_saved"})
+			return
+		}
+		if err := decorateTask(ctx, db, &task, accountID); err != nil {
+			respond(w, http.StatusServiceUnavailable, map[string]string{"error": "tasks_unavailable"})
 			return
 		}
 		respond(w, http.StatusCreated, task)
