@@ -680,20 +680,33 @@ func (w *worker) refreshContactAvatars() {
 		check, done := context.WithTimeout(ctx, 5*time.Second)
 		info, err := w.client.GetProfilePictureInfo(check, jid, &whatsmeow.GetProfilePictureParams{Preview: true})
 		if errors.Is(err, whatsmeow.ErrProfilePictureNotSet) || errors.Is(err, whatsmeow.ErrProfilePictureUnauthorized) {
-			_, _ = w.db.ExecContext(check, "UPDATE contacts SET avatar_data=NULL,avatar_url='' WHERE id=$1 AND account_id=$2 AND avatar_url<>''", item.id, w.accountID)
+			_, _ = w.db.ExecContext(check, "UPDATE contacts SET avatar_data=NULL,avatar_url='' WHERE id=$1 AND account_id=$2 AND (avatar_url<>'' OR avatar_data IS NOT NULL)", item.id, w.accountID)
 		} else if err == nil && info != nil {
-			raw, mime := downloadContactAvatar(check, info.URL)
+			raw, mime := downloadContactAvatar(check, info.URL, 12*1024)
 			if len(raw) > 0 {
 				src := "data:" + mime + ";base64," + base64.StdEncoding.EncodeToString(raw)
-				_, err = w.db.ExecContext(check, "UPDATE contacts SET avatar_data=$1,avatar_mime=$2,avatar_url=$3 WHERE id=$4 AND account_id=$5 AND avatar_url IS DISTINCT FROM $3", raw, mime, src, item.id, w.accountID)
+				_, err = w.db.ExecContext(check, "UPDATE contacts SET avatar_url=$1 WHERE id=$2 AND account_id=$3 AND avatar_url IS DISTINCT FROM $1", src, item.id, w.accountID)
 				if err != nil { log.Print("falha ao armazenar foto de contato") }
 			}
 		}
 		done()
+		if err == nil && info != nil {
+			fullCtx, cancelFull := context.WithTimeout(ctx, 8*time.Second)
+			full, fullErr := w.client.GetProfilePictureInfo(fullCtx, jid, nil)
+			if fullErr == nil && full != nil {
+				raw, mime := downloadContactAvatar(fullCtx, full.URL, 2*1024*1024)
+				if len(raw) > 0 {
+					if _, saveErr := w.db.ExecContext(fullCtx, "UPDATE contacts SET avatar_data=$1,avatar_mime=$2 WHERE id=$3 AND account_id=$4 AND avatar_data IS DISTINCT FROM $1", raw, mime, item.id, w.accountID); saveErr != nil {
+						log.Print("falha ao armazenar foto ampliada")
+					}
+				}
+			}
+			cancelFull()
+		}
 	}
 }
 
-func downloadContactAvatar(ctx context.Context, rawURL string) ([]byte, string) {
+func downloadContactAvatar(ctx context.Context, rawURL string, maxBytes int64) ([]byte, string) {
 	u, err := url.Parse(rawURL)
 	if err != nil || u.Scheme != "https" || u.User != nil || !strings.HasSuffix(u.Hostname(), ".whatsapp.net") || u.Port() != "" {
 		return nil, ""
@@ -705,9 +718,8 @@ func downloadContactAvatar(ctx context.Context, rawURL string) ([]byte, string) 
 	if err != nil { return nil, "" }
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK { return nil, "" }
-	const maxBytes = 12 * 1024
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes+1))
-	if err != nil || len(raw) > maxBytes { return nil, "" }
+	if err != nil || int64(len(raw)) > maxBytes { return nil, "" }
 	mime := http.DetectContentType(raw)
 	switch mime {
 	case "image/jpeg", "image/png", "image/webp":
