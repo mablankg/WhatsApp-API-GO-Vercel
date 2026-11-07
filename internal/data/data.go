@@ -74,6 +74,7 @@ CREATE TABLE IF NOT EXISTS app_accounts (
  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
  enabled BOOLEAN NOT NULL DEFAULT true
 );
+ALTER TABLE app_accounts ADD COLUMN IF NOT EXISTS drive_root_folder_id TEXT;
 CREATE TABLE IF NOT EXISTS app_users (
  id BIGSERIAL PRIMARY KEY,
  account_id TEXT NOT NULL REFERENCES app_accounts(id) ON DELETE CASCADE,
