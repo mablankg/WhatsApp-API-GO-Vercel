@@ -14,23 +14,7 @@ import (
 	"github.com/lib/pq"
 )
 
-var contactAvatarPattern = regexp.MustCompile(`^/v1/contacts/([1-9][0-9]{0,18})/avatarpackage main
-
-import (
-	"crypto/rand"
-	"database/sql"
-	"encoding/hex"
-	"encoding/json"
-	"io"
-	"net/http"
-	"regexp"
-	"strings"
-	"time"
-
-	"github.com/lib/pq"
-)
-
-)
+var contactAvatarPattern = regexp.MustCompile(`^/v1/contacts/([1-9][0-9]{0,18})/avatar$`)
 
 var contactIDPattern = regexp.MustCompile(`^[1-9][0-9]{0,18}$`)
 var contactMessagesPattern = regexp.MustCompile(`^/v1/contacts/([1-9][0-9]{0,18})/messages$`)
