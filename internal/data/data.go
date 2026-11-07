@@ -248,6 +248,35 @@ ALTER TABLE contacts ENABLE ROW LEVEL SECURITY;
 ALTER TABLE attendance_stages ENABLE ROW LEVEL SECURITY;
 ALTER TABLE lawyers ENABLE ROW LEVEL SECURITY;
 ALTER TABLE entity_comments ENABLE ROW LEVEL SECURITY;
+CREATE TABLE IF NOT EXISTS legal_message_tags (
+ account_id TEXT NOT NULL REFERENCES whatsapp_accounts(id),
+ id BIGSERIAL,
+ name TEXT NOT NULL CHECK (length(trim(name)) BETWEEN 1 AND 80),
+ color TEXT NOT NULL CHECK (color ~ '^#[0-9A-Fa-f]{6}$'),
+ PRIMARY KEY (account_id,id)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS legal_message_tags_name_key
+ ON legal_message_tags(account_id,lower(trim(name)));
+CREATE UNIQUE INDEX IF NOT EXISTS messages_account_seq_key ON messages(account_id,seq);
+CREATE TABLE IF NOT EXISTS legal_message_status (
+ account_id TEXT NOT NULL,
+ message_seq BIGINT NOT NULL,
+ status TEXT NOT NULL CHECK (status IN ('pending','in_review','done')),
+ updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+ PRIMARY KEY (account_id,message_seq),
+ FOREIGN KEY (account_id,message_seq) REFERENCES messages(account_id,seq) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS legal_message_tag_links (
+ account_id TEXT NOT NULL,
+ message_seq BIGINT NOT NULL,
+ tag_id BIGINT NOT NULL,
+ PRIMARY KEY (account_id,message_seq,tag_id),
+ FOREIGN KEY (account_id,message_seq) REFERENCES messages(account_id,seq) ON DELETE CASCADE,
+ FOREIGN KEY (account_id,tag_id) REFERENCES legal_message_tags(account_id,id) ON DELETE CASCADE
+);
+ALTER TABLE legal_message_tags ENABLE ROW LEVEL SECURITY;
+ALTER TABLE legal_message_status ENABLE ROW LEVEL SECURITY;
+ALTER TABLE legal_message_tag_links ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON SCHEMA wa_private FROM PUBLIC;
 `
 
