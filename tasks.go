@@ -136,7 +136,7 @@ func handleTasks(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 			INSERT INTO entity_tasks(account_id,entity_type,entity_id,title,description,link_url,attachment,due_at)
 			VALUES($1,$2,$3,$4,$5,$6,$7,$8)
 			RETURNING `+taskColumns+`
-		`, accountID, entityType, entityID, body.Title, body.Description, body.LinkURL, attachment, body.DueAt))
+		`, accountID, entityType, entityID, body.Title, body.Description, body.LinkURL, string(attachment), body.DueAt))
 		if err != nil {
 			respond(w, http.StatusServiceUnavailable, map[string]string{"error": "task_not_saved"})
 			return
