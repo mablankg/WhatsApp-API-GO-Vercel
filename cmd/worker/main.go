@@ -313,7 +313,6 @@ func (w *worker) event(event any) {
 	case *events.Connected:
 		w.state("connected", "", 0)
 		go func() { _, _ = w.refreshGroups() }()
-		go func() { _, _ = w.refreshContacts() }()
 	case *events.Disconnected:
 		w.state("disconnected", "", 0)
 	case *events.LoggedOut:
