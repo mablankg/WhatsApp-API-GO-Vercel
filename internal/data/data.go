@@ -99,6 +99,8 @@ CREATE TABLE IF NOT EXISTS app_sessions (
 );
 CREATE INDEX IF NOT EXISTS app_sessions_active_idx ON app_sessions(token_hash, expires_at) WHERE revoked_at IS NULL;
 INSERT INTO app_accounts(id,name) VALUES('bbadvocacia','BBAdvocacia') ON CONFLICT(id) DO NOTHING;
+ALTER TABLE whatsapp_accounts ADD COLUMN IF NOT EXISTS app_account_id TEXT NOT NULL DEFAULT 'bbadvocacia';
+CREATE INDEX IF NOT EXISTS whatsapp_accounts_app_account_idx ON whatsapp_accounts(app_account_id);
 CREATE TABLE IF NOT EXISTS state (
  id INTEGER PRIMARY KEY CHECK(id=1), status TEXT NOT NULL DEFAULT 'offline',
  qr TEXT NOT NULL DEFAULT '', qr_expires TIMESTAMPTZ,
@@ -233,6 +235,43 @@ CREATE TABLE IF NOT EXISTS entity_comments (
 CREATE INDEX IF NOT EXISTS entity_comments_lookup ON entity_comments(entity_type,entity_id,created_at DESC);
 ALTER TABLE entity_comments ADD COLUMN IF NOT EXISTS account_id TEXT NOT NULL DEFAULT 'primary';
 CREATE INDEX IF NOT EXISTS entity_comments_account_lookup ON entity_comments(account_id,entity_type,entity_id,created_at DESC);
+CREATE TABLE IF NOT EXISTS legal_processes (
+ id BIGSERIAL PRIMARY KEY,
+ app_account_id TEXT NOT NULL REFERENCES app_accounts(id) ON DELETE CASCADE,
+ case_number TEXT NOT NULL DEFAULT '',
+ title TEXT NOT NULL,
+ client_name TEXT NOT NULL DEFAULT '',
+ status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','suspended','closed','archived')),
+ drive_folder_id TEXT NOT NULL DEFAULT '',
+ drive_folder_url TEXT NOT NULL DEFAULT '',
+ notes TEXT NOT NULL DEFAULT '',
+ created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+ updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS legal_processes_case_number_key
+ ON legal_processes(app_account_id,case_number) WHERE case_number<>'';
+CREATE INDEX IF NOT EXISTS legal_processes_search_idx
+ ON legal_processes(app_account_id,lower(title),lower(client_name));
+CREATE TABLE IF NOT EXISTS legal_process_entities (
+ process_id BIGINT NOT NULL REFERENCES legal_processes(id) ON DELETE CASCADE,
+ whatsapp_account_id TEXT NOT NULL REFERENCES whatsapp_accounts(id) ON DELETE CASCADE,
+ entity_type TEXT NOT NULL CHECK(entity_type IN ('contact','group')),
+ entity_id TEXT NOT NULL,
+ created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+ PRIMARY KEY(process_id,whatsapp_account_id,entity_type,entity_id)
+);
+CREATE INDEX IF NOT EXISTS legal_process_entities_lookup
+ ON legal_process_entities(whatsapp_account_id,entity_type,entity_id,created_at DESC);
+CREATE TABLE IF NOT EXISTS legal_process_messages (
+ process_id BIGINT NOT NULL REFERENCES legal_processes(id) ON DELETE CASCADE,
+ whatsapp_account_id TEXT NOT NULL,
+ message_seq BIGINT NOT NULL,
+ created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+ PRIMARY KEY(process_id,whatsapp_account_id,message_seq),
+ FOREIGN KEY(whatsapp_account_id,message_seq) REFERENCES messages(account_id,seq) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS legal_process_messages_lookup
+ ON legal_process_messages(whatsapp_account_id,message_seq);
 INSERT INTO contacts(account_id,whatsapp_id,phone,first_contact_at,last_contact_at)
 SELECT account_id,chat,split_part(chat,'@',1),min(timestamp),max(timestamp)
 FROM messages WHERE chat LIKE '%@s.whatsapp.net'
@@ -249,6 +288,9 @@ ALTER TABLE contacts ENABLE ROW LEVEL SECURITY;
 ALTER TABLE attendance_stages ENABLE ROW LEVEL SECURITY;
 ALTER TABLE lawyers ENABLE ROW LEVEL SECURITY;
 ALTER TABLE entity_comments ENABLE ROW LEVEL SECURITY;
+ALTER TABLE legal_processes ENABLE ROW LEVEL SECURITY;
+ALTER TABLE legal_process_entities ENABLE ROW LEVEL SECURITY;
+ALTER TABLE legal_process_messages ENABLE ROW LEVEL SECURITY;
 CREATE TABLE IF NOT EXISTS legal_message_tags (
  account_id TEXT NOT NULL REFERENCES whatsapp_accounts(id),
  id BIGSERIAL,
@@ -280,4 +322,3 @@ ALTER TABLE legal_message_status ENABLE ROW LEVEL SECURITY;
 ALTER TABLE legal_message_tag_links ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON SCHEMA wa_private FROM PUBLIC;
 `
-

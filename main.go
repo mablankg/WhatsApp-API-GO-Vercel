@@ -69,6 +69,10 @@ func handler(db *sql.DB, token string) http.Handler {
 			handleLawyers(w, r, db)
 			return
 		}
+		if strings.HasPrefix(r.URL.Path, "/v1/processes") || r.URL.Path == "/v1/process-links" || r.URL.Path == "/v1/process-settings" {
+			handleProcesses(w, r, db)
+			return
+		}
 		if r.Method == http.MethodPost && r.URL.Path == "/v1/directory/reset" {
 			id, err := enqueueRaw(ctx, db, requestAccount(r), "reset_directory", []byte(`{}`))
 			if err != nil {
@@ -321,7 +325,7 @@ func handler(db *sql.DB, token string) http.Handler {
 						Data     string `json:"data"`
 					} `json:"media"`
 				}
-			dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 70<<20))
+				dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 70<<20))
 				dec.DisallowUnknownFields()
 				if dec.Decode(&body) != nil || dec.Decode(new(any)) != io.EOF || !phonePattern.MatchString(body.To) || (strings.TrimSpace(body.Text) == "" && body.Media.Data == "") || len(body.Text) > 8000 || len(body.Media.Data) > 34<<20 {
 					respond(w, 400, map[string]string{"error": "use to com DDI, apenas dígitos, e text entre 1 e 8000 bytes"})
@@ -448,7 +452,6 @@ func isGroupMessagePath(path string) bool {
 	return strings.HasPrefix(path, "/v1/groups/") && strings.HasSuffix(path, "/messages")
 }
 
-
 func handleMessageStatus(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 	ctx := r.Context()
 	seq, err := strconv.ParseInt(r.URL.Query().Get("seq"), 10, 64)
@@ -462,7 +465,9 @@ func handleMessageStatus(w http.ResponseWriter, r *http.Request, db *sql.DB) {
 	case http.MethodGet:
 		err = db.QueryRowContext(ctx, "SELECT COALESCE(s.status,'') FROM messages m LEFT JOIN legal_message_status s ON s.account_id=m.account_id AND s.message_seq=m.seq WHERE m.account_id=$1 AND m.seq=$2", account, seq).Scan(&status)
 	case http.MethodPost:
-		var body struct { Status string `json:"status"` }
+		var body struct {
+			Status string `json:"status"`
+		}
 		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1024))
 		if decoder.Decode(&body) != nil || (body.Status != "pending" && body.Status != "in_review" && body.Status != "done") {
 			respond(w, 400, map[string]string{"error": "invalid_status"})
