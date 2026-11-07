@@ -24,6 +24,7 @@ type contact struct {
 	WhatsAppID      string         `json:"whatsapp_id"`
 	Phone           string         `json:"phone"`
 	Name            string         `json:"name"`
+	AvatarURL       string         `json:"avatar_url"`
 	Nickname        string         `json:"nickname"`
 	Email           string         `json:"email"`
 	TaxID           string         `json:"tax_id"`
@@ -44,12 +45,12 @@ type contact struct {
 	UpdatedAt       time.Time      `json:"updated_at"`
 }
 
-const contactColumns = `id,whatsapp_id,phone,name,nickname,email,tax_id,contact_type,status,attendance_stage,priority,COALESCE(lawyer_id,0),COALESCE((SELECT name FROM lawyers WHERE id=contacts.lawyer_id),''),COALESCE((SELECT color FROM lawyers WHERE id=contacts.lawyer_id),''),responsible,tags,notes,extra,first_contact_at,last_contact_at,archived,updated_at`
+const contactColumns = `id,whatsapp_id,phone,name,avatar_url,nickname,email,tax_id,contact_type,status,attendance_stage,priority,COALESCE(lawyer_id,0),COALESCE((SELECT name FROM lawyers WHERE id=contacts.lawyer_id),''),COALESCE((SELECT color FROM lawyers WHERE id=contacts.lawyer_id),''),responsible,tags,notes,extra,first_contact_at,last_contact_at,archived,updated_at`
 
 func scanContact(scanner interface{ Scan(...any) error }) (contact, error) {
 	var item contact
 	var extra []byte
-	err := scanner.Scan(&item.ID, &item.WhatsAppID, &item.Phone, &item.Name, &item.Nickname, &item.Email, &item.TaxID, &item.ContactType, &item.Status, &item.AttendanceStage, &item.Priority, &item.LawyerID, &item.LawyerName, &item.LawyerColor, &item.Responsible, &item.Tags, &item.Notes, &extra, &item.FirstContactAt, &item.LastContactAt, &item.Archived, &item.UpdatedAt)
+	err := scanner.Scan(&item.ID, &item.WhatsAppID, &item.Phone, &item.Name, &item.AvatarURL, &item.Nickname, &item.Email, &item.TaxID, &item.ContactType, &item.Status, &item.AttendanceStage, &item.Priority, &item.LawyerID, &item.LawyerName, &item.LawyerColor, &item.Responsible, &item.Tags, &item.Notes, &extra, &item.FirstContactAt, &item.LastContactAt, &item.Archived, &item.UpdatedAt)
 	if len(extra) > 0 {
 		_ = json.Unmarshal(extra, &item.Extra)
 	}
