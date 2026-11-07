@@ -669,7 +669,7 @@ func (w *worker) refreshContacts() (int, error) {
 	seen := map[string]bool{}
 	for jid, info := range items {
 		// Profile and business names alone do not establish an address-book entry.
-		name := firstContactName(info.FullName, info.FirstName)
+		name := firstContactName(info.FullName, info.FirstName, info.PushName)
 		if name == "" { continue }
 		phoneJID := jid
 		if jid.Server == types.HiddenUserServer {
@@ -708,7 +708,7 @@ func (w *worker) refreshContacts() (int, error) {
 	}
 	_, err = tx.ExecContext(ctx, `WITH input AS (
 		SELECT * FROM jsonb_to_recordset($1::jsonb) AS x(whatsapp_id text,phone text,name text)
-	) UPDATE contacts SET name=CASE WHEN contacts.name='' THEN input.name ELSE contacts.name END,updated_at=now()
+	) UPDATE contacts SET name=CASE WHEN input.name<>'' THEN input.name ELSE contacts.name END,updated_at=now()
 	FROM input WHERE contacts.account_id=$2 AND contacts.phone=input.phone`, string(payload), w.accountID)
 	if err != nil {
 		return 0, err
