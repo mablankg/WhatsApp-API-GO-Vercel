@@ -687,6 +687,7 @@ func (w *worker) refreshContacts() (int, error) {
 		imports = append(imports, contactImport{WhatsAppID: phoneJID.String(), Phone: phoneJID.User, Name: name})
 	}
 	if len(imports) == 0 {
+		w.refreshContactAvatars(ctx)
 		return 0, nil
 	}
 	payload, err := json.Marshal(imports)
