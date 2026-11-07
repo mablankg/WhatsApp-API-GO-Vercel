@@ -633,6 +633,26 @@ func (w *worker) upsertGroup(group *types.GroupInfo) {
 	}
 }
 
+func (w *worker) refreshContactAvatars(ctx context.Context) {
+	rows, err := w.db.QueryContext(ctx, `SELECT id, whatsapp_id FROM contacts WHERE account_id=$1 AND whatsapp_id <> ''`, w.accountID)
+	if err != nil { log.Printf("falha ao listar contatos para avatares: %v", err); return }
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		var rawJID string
+		if err := rows.Scan(&id, &rawJID); err != nil { continue }
+		jid, err := types.ParseJID(rawJID)
+		if err != nil || jid.IsEmpty() { continue }
+		info, err := w.client.GetProfilePictureInfo(ctx, jid, nil)
+		if err != nil { continue }
+		avatar := ""
+		if info != nil { avatar = info.URL }
+		if _, err := w.db.ExecContext(ctx, "UPDATE contacts SET avatar_url=$1,updated_at=now() WHERE id=$2 AND account_id=$3", avatar, id, w.accountID); err != nil {
+			log.Printf("falha ao salvar avatar do contato %d: %v", id, err)
+		}
+	}
+}
+
 func (w *worker) refreshContacts() (int, error) {
 	ctx, cancel := context.WithTimeout(w.ctx, 45*time.Second)
 	defer cancel()
@@ -695,6 +715,7 @@ func (w *worker) refreshContacts() (int, error) {
 	if err = tx.Commit(); err != nil {
 		return 0, err
 	}
+	w.refreshContactAvatars(ctx)
 	return len(imports), nil
 }
 
