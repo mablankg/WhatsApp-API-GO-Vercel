@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/url"
@@ -36,9 +37,53 @@ func scanLegalProcess(scanner interface{ Scan(...any) error }) (legalProcess, er
 }
 
 func requestAppAccount(r *http.Request, db *sql.DB) (string, error) {
+	ctx := r.Context()
+	whatsAppAccountID := requestAccount(r)
 	var appAccountID string
-	err := db.QueryRowContext(r.Context(), `SELECT app_account_id FROM whatsapp_accounts WHERE id=$1 AND enabled=true`, requestAccount(r)).Scan(&appAccountID)
-	return appAccountID, err
+	err := db.QueryRowContext(ctx, `
+		SELECT wa.app_account_id
+		FROM whatsapp_accounts wa
+		JOIN app_accounts aa ON aa.id = wa.app_account_id AND aa.enabled = true
+		WHERE wa.id = $1 AND wa.enabled = true
+	`, whatsAppAccountID).Scan(&appAccountID)
+	if err == nil && appAccountID != "" {
+		return appAccountID, nil
+	}
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return "", err
+	}
+
+	// Instalações antigas podem ter a conexão do WhatsApp criada antes do
+	// cadastro da conta jurídica. Quando existe uma única conta ativa, o vínculo
+	// é inequívoco e pode ser reparado automaticamente.
+	var activeAccounts int
+	if err := db.QueryRowContext(ctx, `
+		SELECT COUNT(*), COALESCE(MIN(id), '')
+		FROM app_accounts
+		WHERE enabled = true
+	`).Scan(&activeAccounts, &appAccountID); err != nil {
+		return "", err
+	}
+	if activeAccounts != 1 || appAccountID == "" {
+		return "", sql.ErrNoRows
+	}
+
+	result, err := db.ExecContext(ctx, `
+		UPDATE whatsapp_accounts
+		SET app_account_id = $2, updated_at = now()
+		WHERE id = $1 AND enabled = true
+	`, whatsAppAccountID, appAccountID)
+	if err != nil {
+		return "", err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return "", err
+	}
+	if rows != 1 {
+		return "", sql.ErrNoRows
+	}
+	return appAccountID, nil
 }
 
 func validProcessStatus(status string) bool {
